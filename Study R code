@@ -1,0 +1,4254 @@
+# 1. Exposure data screening and clumping
+# install.packages("remotes")
+# remotes::install_github("MRCIEU/TwoSampleMR")
+library(TwoSampleMR)
+inputFile="6895_1_TFRC_TR.txt" 
+outFile="6895_1_TFRC_TR.exposure_data.csv" 
+setwd("") 
+rt=read.table(inputFile, header=T, sep="\t", check.names=F)
+pvalRT<-subset(rt, Pval<5e-08)
+pvalRT<-subset(pvalRT, ImpMAF>0.01)
+write.csv(pvalRT, file="exposure.pvalue.csv", row.names=F)
+exposure_dat<-read_exposure_data(filename="exposure.pvalue.csv",
+                                 sep = ",",
+                                 snp_col = "rsids",        
+                                 beta_col = "Beta",         
+                                 se_col = "SE",            
+                                 effect_allele_col = "effectAllele", 
+                                 other_allele_col = "otherAllele",  
+                                 eaf_col = "ImpMAF",       
+                                 pval_col = "Pval",       
+                                 samplesize_col = "N",     
+                                 chr_col="Chrom",         
+                                 pos_col = "Pos",          
+                                 clump = F)              
+file.remove("exposure.pvalue.csv")
+exposure_dat_clumped <- clump_data(exposure_dat, clump_kb=10000, clump_r2=0.001)
+write.csv(exposure_dat_clumped, file=outFile, row.names=F)
+
+
+
+
+# 2. Screening out strong instrumental variables
+#install.packages("devtools")
+#devtools::install_github("mrcieu/ieugwasr", force = TRUE)
+library(ieugwasr)
+inputFile="exposure_data.csv"  
+setwd("") 
+dat=read.csv(inputFile, header=T, sep=",", check.names=F)
+dat$R2<-(2*dat$beta.exposure*dat$beta.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)/(2*dat$beta.exposure*dat$beta.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)+2*dat$se.exposure*dat$se.exposure*dat$samplesize.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)))
+# F = (R² * (N-2)) / (1-R²)
+dat$F<-dat$R2*(dat$samplesize.exposure-2)/(1-dat$R2)
+outTab=dat[as.numeric(dat$F)>10,]
+write.csv(outTab, file="exposure.F.csv", row.names=F)
+
+
+
+
+# 3. MR analysis and sensitivity analysis
+library(VariantAnnotation)
+library(gwasglue)
+library(TwoSampleMR)
+setwd("")
+exposureFile = "exposure.F.csv"        
+outcomeFile = "ieu-b-4969.csv"  
+outcomeName = "Melanoma Skin" 
+outcomeID = "ieu-b-4969"
+exposure_dat = read_exposure_data(
+  filename = exposureFile,
+  sep = ",",
+  snp_col = "SNP",                           
+  beta_col = "beta.exposure",                
+  se_col = "se.exposure",                    
+  pval_col = "pval.exposure",                
+  effect_allele_col = "effect_allele.exposure", 
+  other_allele_col = "other_allele.exposure",   
+  eaf_col = "eaf.exposure",                  
+  phenotype_col = "exposure",                
+  id_col = "id.exposure",                    
+  samplesize_col = "samplesize.exposure",    
+  chr_col = "chr.exposure", 
+  pos_col = "pos.exposure",                  
+  clump = FALSE                              
+)
+outcomeData = read.csv(outcomeFile, sep=",")
+if(!"outcome" %in% colnames(outcomeData)) {
+  outcomeData$outcome = outcomeName
+}
+outcomeData = outcomeData[!duplicated(outcomeData$SNP),]
+print(dim(outcomeData))
+print(head(colnames(outcomeData)))
+dat = harmonise_data(exposure_dat, outcomeData)
+print(paste(nrow(dat)))
+print(paste(ncol(dat)))
+dat = dat[dat$pval.outcome > 0.05,]
+print(paste(nrow(dat[dat$mr_keep == "TRUE",])))
+outTab = dat[dat$mr_keep == "TRUE",]
+write.csv(outTab, file = "table.SNP.formatted.csv", row.names = FALSE)
+mrResult = mr(dat)
+mrTab = generate_odds_ratios(mrResult)
+write.csv(mrTab, file = "table.MRresult.formatted.csv", row.names = FALSE)
+heterTab = mr_heterogeneity(dat)
+write.csv(heterTab, file = "table.heterogeneity.formatted.csv", row.names = FALSE)
+pleioTab = mr_pleiotropy_test(dat)
+write.csv(pleioTab, file = "table.pleiotropy.formatted.csv", row.names = FALSE)
+pdf(file = "pic.scatter_plot.formatted.pdf", width = 7.5, height = 7)
+mr_scatter_plot(mrResult, dat)
+dev.off()
+res_single = mr_singlesnp(dat)
+pdf(file = "pic.forest.formatted.pdf", width = 7, height = 5.5)
+mr_forest_plot(res_single)
+dev.off()
+pdf(file = "pic.funnel_plot.formatted.pdf", width = 7, height = 6.5)
+mr_funnel_plot(singlesnp_results = res_single)
+dev.off()
+pdf(file = "pic.leaveoneout.formatted.pdf", width = 7, height = 5.5)
+mr_leaveoneout_plot(leaveoneout_results = mr_leaveoneout(dat))
+dev.off()
+print(mrTab)
+print(pleioTab)
+print(heterTab)
+
+
+
+# 4.ivw screening proteins and graphics
+pvalFilter=0.05 
+mrFile="table.MRresult.csv"  
+pleFile="table.pleiotropy.csv"    
+setwd("") 
+rt=read.csv(mrFile, header=T, sep=",", check.names=F)
+ivwRT=rt[rt$method=="Inverse variance weighted",] 
+
+ivw=data.frame()
+for(protein in unique(ivwRT$id.exposure)){
+  proteinData=rt[rt$id.exposure==protein,]
+  if(sum(proteinData$or>1)==5 | sum(proteinData$or<1)==5){
+    ivw=rbind(ivw, ivwRT[ivwRT$id.exposure==protein,])
+  }
+}
+
+pleRT=read.csv(pleFile, header=T, sep=",", check.names=F)
+pleRT=pleRT[pleRT$pval>0.05,]
+proteinLists=as.vector(pleRT$id.exposure)
+
+outTab=ivw[ivw$id.exposure %in% proteinLists,]
+outTab=outTab[order(outTab$pval),] 
+outTab=outTab[!duplicated(outTab$exposure),] 
+write.csv(outTab, file="IVW.result.csv", row.names=F)
+
+ivwFilter=outTab[(outTab$pval<pvalFilter),]
+write.csv(ivwFilter, file="IVW.filter.csv", row.names=F)
+
+
+library(TwoSampleMR)
+
+output_dir <- "MR_Scatter_Plots"
+if(!dir.exists(output_dir)){
+  dir.create(output_dir)
+}
+
+exposure_all <- read_exposure_data(
+  filename = "exposure.F.csv",
+  sep = ",",
+  snp_col = "SNP",
+  beta_col = "beta.exposure",
+  se_col = "se.exposure",
+  pval_col = "pval.exposure",
+  effect_allele_col = "effect_allele.exposure",
+  other_allele_col = "other_allele.exposure",
+  eaf_col = "eaf.exposure",
+  phenotype_col = "exposure",
+  id_col = "id.exposure",
+  samplesize_col = "samplesize.exposure",
+  chr_col = "chr.exposure",
+  pos_col = "pos.exposure",
+  clump = FALSE
+)
+
+outcome_all <- read.csv("ieu-b-4969.csv", sep=",")
+if(!"outcome" %in% colnames(outcome_all)) {
+  outcome_all$outcome <- "Melanoma Skin"
+}
+outcome_all <- outcome_all[!duplicated(outcome_all$SNP),]
+
+success_count <- 0
+
+for(i in 1:nrow(ivwFilter)){
+  
+  protein_id <- ivwFilter$id.exposure[i]
+  protein_name <- ivwFilter$exposure[i]
+   tryCatch({
+    exposure_current <- exposure_all[exposure_all$id.exposure == protein_id, ]
+    
+    if(nrow(exposure_current) < 3){
+      next
+    }
+    dat <- harmonise_data(exposure_current, outcome_all)
+    dat <- dat[dat$pval.outcome > 0.05, ]
+    if(sum(dat$mr_keep == TRUE) < 3){
+      next
+    }
+    mrResult <- mr(dat)
+    pdf(file = paste0(output_dir, "/", protein_name, ".scatter_plot.pdf"), 
+        width = 7, height = 6.5)
+    p1 <- mr_scatter_plot(mrResult, dat)
+    print(p1) 
+    dev.off()
+    output_file <- paste0(output_dir, "/", protein_name, ".scatter_plot.pdf")
+    if(file.exists(output_file) && file.info(output_file)$size > 1000){
+      success_count <- success_count + 1
+    } else {
+    }
+    
+  }, error = function(e){
+    dev.off() 
+    cat(paste("substr(e$message, 1, 50), "\n"))
+  })
+}
+
+
+# 5.reverse MR analysis
+# install.packages("devtools")
+# devtools::install_github("mrcieu/gwasglue", force = TRUE)
+# install.packages("remotes")
+# remotes::install_github("MRCIEU/TwoSampleMR")
+library(gwasglue)
+library(TwoSampleMR)
+
+ivwFile="IVW.filter.csv"  
+setwd("")
+rt=read.csv(ivwFile, header=T, sep=",", check.names=F)
+row.names(rt)=rt$id.exposure
+exposureID=unique(rt$id.outcome)
+dat=extract_instruments(exposureID, p1=5e-08, p2=5e-08, clump=TRUE)
+dat$R2<-(2*dat$beta.exposure*dat$beta.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)/(2*dat$beta.exposure*dat$beta.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)+2*dat$se.exposure*dat$se.exposure*dat$samplesize.exposure*dat$eaf.exposure*(1-dat$eaf.exposure)))     # 计算R2
+dat$F<-dat$R2*(dat$samplesize.exposure-2)/(1-dat$R2)
+exposure_dat=dat[as.numeric(dat$F)>10,]
+for(i in row.names(rt)){
+  outcomeFile=paste0(i, ".txt.gz")
+  if(!file.exists(outcomeFile)){next} 
+  outcome_dat<-read_outcome_data(snps=exposure_dat$SNP,
+                                 filename=outcomeFile, sep = "\t",
+                                 snp_col = "rsids",
+                                 beta_col = "Beta",
+                                 se_col = "SE",
+                                 effect_allele_col = "effectAllele",
+                                 other_allele_col = "otherAllele",
+                                 pval_col = "Pval",
+                                 eaf_col = "ImpMAF")
+  outcome_dat$outcome=rt[i, "exposure"]
+  dat <- harmonise_data(exposure_dat, outcome_dat)
+  dat=dat[dat$pval.outcome>0.05,] 
+  presso=run_mr_presso(dat)
+  write.csv(presso[[1]]$`MR-PRESSO results`$`Global Test`, file=paste0(i, ".table.MR-PRESSO_Global.csv"))
+  write.csv(presso[[1]]$`MR-PRESSO results`$`Outlier Test`, file=paste0(i, ".table.MR-PRESSO_Outlier.csv"))
+  mrResult=mr(dat)
+  mrTab=generate_odds_ratios(mrResult)
+  write.csv(mrTab, file=paste0(i, ".table.MRresult.csv"), row.names=F)
+  if(mrResult$pval[3]<0.05){
+    outTab=dat[dat$mr_keep=="TRUE",]
+    write.csv(outTab, file=paste0(i, ".table.SNP.csv"), row.names=F)
+    heterTab=mr_heterogeneity(dat)
+    write.csv(heterTab, file=paste0(i, ".table.heterogeneity.csv"), row.names=F)
+    pleioTab=mr_pleiotropy_test(dat)
+    write.csv(pleioTab, file=paste0(i, ".table.pleiotropy.csv"), row.names=F)
+    pdf(file=paste0(i, ".scatter_plot.pdf"), width=7, height=6.5)
+    p1=mr_scatter_plot(mrResult, dat)
+    print(p1)
+    dev.off()
+    res_single=mr_singlesnp(dat)   
+    pdf(file=paste0(i, ".forest.pdf"), width=6.5, height=5)
+    p2=mr_forest_plot(res_single)
+    print(p2)
+    dev.off()
+    pdf(file=paste0(i, ".funnel_plot.pdf"), width=6.5, height=6)
+    p3=mr_funnel_plot(singlesnp_results = res_single)
+    print(p3)
+    dev.off()
+    pdf(file=paste0(i, ".leaveoneout.pdf"), width=6.5, height=5)
+    p4=mr_leaveoneout_plot(leaveoneout_results = mr_leaveoneout(dat))
+    print(p4)
+    dev.off()
+  }
+}
+
+
+# 5.forest
+library(grid)
+library(readr)
+library(forestploter)
+
+setwd(")
+data = read.csv("IVW.filter.csv", header=T, sep=",", check.names=F)
+lineVec = cumsum(c(1, table(data[,"exposure"])))
+
+data$' ' <- paste(rep(" ", 10), collapse = " ")
+data$'OR(95% CI)' = ifelse(is.na(data$or), "", sprintf("%.3f (%.3f to %.3f)", data$or, data$or_lci95, data$or_uci95))
+data$pval = ifelse(data$pval<0.001, "<0.001", sprintf("%.3f", data$pval))
+data$exposure = ifelse(is.na(data$exposure), "", data$exposure)
+data$nsnp = ifelse(is.na(data$nsnp), "", data$nsnp)
+data$method = "IVW"
+tm <- forest_theme(
+  base_size = 16,
+  ci_pch = 16,
+  ci_lty = 1,
+  ci_lwd = 1.5,
+  ci_col = "black",
+  ci_Theight = 0.2,
+  refline_gp = gpar(lty = "dashed", lwd = 1, col = "grey20"),
+
+  xaxis_gp = gpar(fontsize = 16, lwd = 1, cex = 1.2),
+  footnote_gp = gpar(fontsize = 14, cex = 0.6, col = "blue")
+)
+
+plot <- forestploter::forest(
+  data[, c("exposure", "nsnp", "method", "pval", " ", "OR(95% CI)")],
+  est = data$or,
+  lower = data$or_lci95,
+  upper = data$or_uci95,
+  ci_column = 5,
+  ref_line = 1,
+  xlim = c(0.985, 1.015),  
+  ticks_at = c(0.985, 1.000, 1.015),
+  theme = tm
+)
+boxcolor = "#4775FF"
+for(i in 1:nrow(data)){
+  plot <- edit_plot(plot, col=5, row=i, which="ci", gp=gpar(fill=boxcolor, fontsize=20))
+}
+pos_bold_pval = which(as.numeric(gsub('<',"",data$pval))<0.05)
+if(length(pos_bold_pval)>0){
+  for(i in pos_bold_pval){
+    plot <- edit_plot(plot, col=4, row=i, which="text", gp=gpar(fontface="bold"))
+  }
+}
+plot <- add_border(plot, part="header", row=1, where="top", gp=gpar(lwd=2))
+plot <- add_border(plot, part="header", row=lineVec, gp=gpar(lwd=1))
+plot <- edit_plot(plot, col=1:ncol(data), row=1:nrow(data), which="text", gp=gpar(fontsize=12))
+plot <- edit_plot(plot, col=1:ncol(data), which="text", hjust=unit(0.5, "npc"), part="header",
+                  x=unit(0.5, "npc"))
+plot <- edit_plot(plot, col=1:ncol(data), which="text", hjust=unit(0.5, "npc"),
+                  x=unit(0.5, "npc"))
+
+pdf(file="forest.pdf", width=12, height=22)
+print(plot)
+dev.off()
+
+
+
+
+
+
+# 6.circos
+install.packages("reshape2")
+install.packages("circlize")
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("ComplexHeatmap", force = TRUE)
+
+
+library(reshape2)
+library(circlize)
+library(ComplexHeatmap)
+
+mrFile = "table.MRresult.csv"      
+sigFile = "IVW.filter.csv"         
+
+setwd("")
+rt = read.csv(mrFile, header = T, sep = ",", check.names = F)
+sigRT = read.csv(sigFile, header = T, sep = ",", check.names = F)
+rt = rt[(rt$id.exposure %in% as.vector(sigRT$id.exposure)), ]
+rt$method[rt$method == "Inverse variance weighted"] = "IVW"
+mat = acast(rt, exposure ~ method, value.var = "pval")
+col_color = colorRamp2(c(0, 0.05, 0.5, 1), c("red", "white", "skyblue", "blue"))
+circos.par(gap.after = c(26))
+
+pdf(file = "circos.pdf", width = 7, height = 7)
+circos.heatmap(mat, col = col_color,
+               rownames.cex = 0.75,          
+               dend.side = "inside",          
+               rownames.side = "outside",     
+               bg.border = "black")           
+
+cn = colnames(mat)                            
+n = length(cn)
+circos.text(rep(CELL_META$cell.xlim[2], n) + 
+              convert_x(1, "mm"),            
+            1.1 + (n:1) * 0.55,              
+            cn,                              
+            cex = 0.75,                     
+            adj = c(0, 0.5),               
+            facing = "inside")               
+
+circos.clear()
+lgd = Legend(title = "Pvalue", col_fun = col_color)
+grid.draw(lgd)
+dev.off()
+
+
+
+
+
+# 7.vol
+library(dplyr)     
+library(ggplot2)     
+library(ggrepel)     
+
+ivwFile = "IVW.result.csv"    
+sigFile = "IVW.filter.csv"   
+
+
+setwd("")
+rt = read.csv(ivwFile, header = T, sep = ",", check.names = F)
+rt = rt[order(rt$pval), ]     
+row.names(rt) = rt[, "exposure"] 
+rt = rename(rt, pvalue = pval)   
+
+geneRT = read.csv(sigFile, header = T, sep = ",", check.names = F)
+showGene = as.vector(geneRT[, "exposure"]) 
+showData = rt[showGene, ]    
+p = ggplot(rt, aes(b, -log10(pvalue))) +
+  geom_hline(yintercept = seq(0, 3, by = 0.5), color = "#EFEFEF", linewidth = 0.2) +
+  geom_vline(xintercept = seq(-0.010, 0.010, by = 0.005), color = "#EFEFEF", linewidth = 0.2) +
+  geom_point(aes(col = -log10(pvalue), size = -log10(pvalue)), 
+             alpha = 0.75, shape = 21, stroke = 0.1) + 
+  xlab("Beta") + ylab("-log10(pvalue)") + 
+  scale_x_continuous(limits = c(-0.010, 0.010), 
+                     breaks = c(-0.010, -0.005, 0.000, 0.005, 0.010),
+                     labels = c("-0.010", "-0.005", "0.000", "0.005", "0.010"),
+                     expand = c(0.02, 0.02)) +  
+  scale_y_continuous(expand = c(0.02, 0.02)) +
+  scale_color_gradientn(
+    colors = c("#39489f", "#39bbec", "#f9ed36", "#f38466", "#b81f25"),
+    name = "-log10(pvalue)" 
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", 
+             color = "#666666", linewidth = 0.4) +
+  scale_size_continuous(range = c(0.5, 3.5), name = "-log10(pvalue)") + 
+  labs(title = " ") +
+  theme(plot.title = element_text(size = 16, hjust = 0.5, face = "bold"))
+p1 = p + geom_text_repel(
+  data = showData,
+  box.padding = 0.8,         
+  point.padding = 0.5,        
+  min.segment.length = 0.2,   
+  force = 10,                 
+  nudge_x = ifelse(showData$b < 0, -0.0015, 0.0015),  
+  nudge_y = 0.3,              
+  direction = "both",  
+  segment.size = 0.2,      
+  hjust = 0.5,               
+  segment.color = "#777777",  
+  size = 2, 
+  aes(label = exposure),
+  max.overlaps = 30          
+) + 
+  theme_bw() +
+  theme(
+    panel.grid.major = element_line(color = "#F5F5F5"),  
+    panel.grid.minor = element_blank(),                 
+    panel.border = element_rect(color = "#BBBBBB"),   
+    legend.position = "right",
+    legend.box = "vertical",                           
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "cm"), 
+    legend.box.spacing = unit(0, "cm"),                
+    plot.margin = unit(c(0.7, 0.7, 0.7, 0.7), "cm"),  
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "white")   
+  ) +
+  guides(color = guide_colorbar(order = 1, direction = "vertical", title.position = "top", barwidth = 0.8),
+         size = guide_legend(order = 2, direction = "vertical", title.position = "top"))
+pdf(file = "vol.pdf", width = 8, height = 6.8)
+print(p1)
+dev.off()
+
+
+
+
+
+# 8.GO
+install.packages("colorspace")
+install.packages("stringi")
+install.packages("ggplot2")
+install.packages("circlize")
+install.packages("RColorBrewer")
+install.packages("ggpubr")
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DOSE")
+BiocManager::install("clusterProfiler")
+BiocManager::install("enrichplot")
+BiocManager::install("ComplexHeatmap")
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(circlize)
+library(RColorBrewer)
+library(dplyr)
+library("ggpubr")
+library(ComplexHeatmap)
+
+pvalueFilter=0.05   
+p.adjustFilter=1      
+
+colorSel="p.adjust"
+if(p.adjustFilter>0.05){
+  colorSel="pvalue"
+}
+
+setwd("")    
+rt=read.csv("IVW.filter.csv", header=T, sep=",", check.names=F)    
+genes=unique(as.vector(rt[,"exposure"]))
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]    
+#gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+kk=enrichGO(gene=gene, OrgDb=org.Hs.eg.db, pvalueCutoff=1, qvalueCutoff=1, ont="all", readable=T)
+GO=as.data.frame(kk)
+GO=GO[(GO$pvalue<pvalueFilter & GO$p.adjust<p.adjustFilter),]
+write.table(GO, file="GO.txt", sep="\t", quote=F, row.names = F)
+
+pdf(file="barplot.pdf", width=10, height=7)
+bar=barplot(kk, drop=TRUE, showCategory=10, label_format=100, split="ONTOLOGY", color=colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bar)
+dev.off()
+
+pdf(file="bubble.pdf", width=10, height=7)
+bub=dotplot(kk, showCategory=10, orderBy="GeneRatio", label_format=100, split="ONTOLOGY", color=colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bub)
+dev.off()
+
+ontology.col=c("#00CC33FF", "#FFC20AFF", "#CC33FFFF")
+data=GO[order(GO$p.adjust),]
+datasig=data[data$pvalue<0.05,,drop=F]
+BP = datasig[datasig$ONTOLOGY=="BP",,drop=F]
+CC = datasig[datasig$ONTOLOGY=="CC",,drop=F]
+MF = datasig[datasig$ONTOLOGY=="MF",,drop=F]
+BP = head(BP,6)
+CC = head(CC,6)
+MF = head(MF,6)
+data = rbind(BP,CC,MF)
+main.col = ontology.col[as.numeric(as.factor(data$ONTOLOGY))]
+BgGene = as.numeric(sapply(strsplit(data$BgRatio,"/"),'[',1))
+Gene = as.numeric(sapply(strsplit(data$GeneRatio,'/'),'[',1))
+ratio = Gene/BgGene
+logpvalue = -log(data$pvalue,10)
+logpvalue.col = brewer.pal(n = 6, name = "Reds")
+f = colorRamp2(breaks = c(0,1,2,3,4,5), colors = logpvalue.col)
+BgGene.col = f(logpvalue)
+df = data.frame(GO=data$ID,start=1,end=max(BgGene))
+rownames(df) = df$GO
+bed2 = data.frame(GO=data$ID,start=1,end=BgGene,BgGene=BgGene,BgGene.col=BgGene.col)
+bed3 = data.frame(GO=data$ID,start=1,end=Gene,BgGene=Gene)
+bed4 = data.frame(GO=data$ID,start=1,end=max(BgGene),ratio=ratio,col=main.col)
+bed4$ratio = bed4$ratio/max(bed4$ratio)*9.5
+pdf(file="GO.circlize.pdf", width=10, height=10)
+par(omi=c(0.1,0.1,0.1,1.5))
+circos.par(track.margin=c(0.01,0.01))
+circos.genomicInitialize(df,plotType="none")
+circos.trackPlotRegion(ylim = c(0, 1), panel.fun = function(x, y) {
+  sector.index = get.cell.meta.data("sector.index")
+  xlim = get.cell.meta.data("xlim")
+  ylim = get.cell.meta.data("ylim")
+  circos.text(mean(xlim), mean(ylim), sector.index, cex = 0.8, facing = "bending.inside", niceFacing = TRUE)
+}, track.height = 0.08, bg.border = NA,bg.col = main.col)
+
+for(si in get.all.sector.index()) {
+  circos.axis(h = "top", labels.cex = 0.6, sector.index = si,track.index = 1,
+              major.at=seq(0,max(BgGene),by=100),labels.facing = "clockwise")
+}
+f = colorRamp2(breaks = c(-1, 0, 1), colors = c("green", "black", "red"))
+circos.genomicTrack(bed2, ylim = c(0, 1),track.height = 0.1,bg.border="white",
+                    panel.fun = function(region, value, ...) {
+                      i = getI(...)
+                      circos.genomicRect(region, value, ytop = 0, ybottom = 1, col = value[,2], 
+                                         border = NA, ...)
+                      circos.genomicText(region, value, y = 0.4, labels = value[,1], adj=0,cex=0.8,...)
+                    })
+circos.genomicTrack(bed3, ylim = c(0, 1),track.height = 0.1,bg.border="white",
+                    panel.fun = function(region, value, ...) {
+                      i = getI(...)
+                      circos.genomicRect(region, value, ytop = 0, ybottom = 1, col = '#BA55D3', 
+                                         border = NA, ...)
+                      circos.genomicText(region, value, y = 0.4, labels = value[,1], cex=0.9,adj=0,...)
+                    })
+circos.genomicTrack(bed4, ylim = c(0, 10),track.height = 0.35,bg.border="white",bg.col="grey90",
+                    panel.fun = function(region, value, ...) {
+                      cell.xlim = get.cell.meta.data("cell.xlim")
+                      cell.ylim = get.cell.meta.data("cell.ylim")
+                      for(j in 1:9) {
+                        y = cell.ylim[1] + (cell.ylim[2]-cell.ylim[1])/10*j
+                        circos.lines(cell.xlim, c(y, y), col = "#FFFFFF", lwd = 0.3)
+                      }
+                      circos.genomicRect(region, value, ytop = 0, ybottom = value[,1], col = value[,2], 
+                                         border = NA, ...)
+                      #circos.genomicText(region, value, y = 0.3, labels = value[,1], ...)
+                    })
+circos.clear()
+middle.legend = Legend(
+  labels = c('Number of Genes','Number of Select','Rich Factor(0-1)'),
+  type="points",pch=c(15,15,17),legend_gp = gpar(col=c('pink','#BA55D3',ontology.col[1])),
+  title="",nrow=3,size= unit(3, "mm")
+)
+circle_size = unit(1, "snpc")
+draw(middle.legend,x=circle_size*0.42)
+main.legend = Legend(
+  labels = c("Biological Process","Cellular Component", "Molecular Function"),  type="points",pch=15,
+  legend_gp = gpar(col=ontology.col), title_position = "topcenter",
+  title = "ONTOLOGY", nrow = 3,size = unit(3, "mm"),grid_height = unit(5, "mm"),
+  grid_width = unit(5, "mm")
+)
+logp.legend = Legend(
+  labels=c('(0,1]','(1,2]','(2,3]','(3,4]','(4,5]','>=5'),
+  type="points",pch=16,legend_gp=gpar(col=logpvalue.col),title="-log10(Pvalue)",
+  title_position = "topcenter",grid_height = unit(5, "mm"),grid_width = unit(5, "mm"),
+  size = unit(3, "mm")
+)
+lgd = packLegend(main.legend,logp.legend)
+circle_size = unit(1, "snpc")
+print(circle_size)
+draw(lgd, x = circle_size*0.85, y=circle_size*0.55,just = "left")
+dev.off()
+
+
+
+
+
+
+
+# 8.KEGG
+#install.packages("colorspace")
+#install.packages("stringi")
+#install.packages("ggplot2")
+#install.packages("circlize")
+#install.packages("RColorBrewer")
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("org.Hs.eg.db")
+#BiocManager::install("DOSE")
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("enrichplot")
+#BiocManager::install("ComplexHeatmap")
+
+library(clusterProfiler)  
+library(org.Hs.eg.db)     
+library(enrichplot)       
+library(ggplot2)          
+library(circlize)         
+library(RColorBrewer)   
+library(dplyr)          
+library(ComplexHeatmap)  
+
+pvalueFilter=0.05   
+qvalueFilter=1      
+
+colorSel="qvalue"
+if(qvalueFilter>0.05){
+  colorSel="pvalue"
+}
+
+setwd("")     
+rt=read.csv("IVW.filter.csv", header=T, sep=",", check.names=F)   
+
+genes=unique(as.vector(rt[,"exposure"]))
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+rt=data.frame(genes, entrezID=entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]      
+gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+kk <- enrichKEGG(gene=gene, organism="hsa", pvalueCutoff=1, qvalueCutoff=1)
+kk@result$Description=gsub(" - Mus musculus \\(house mouse\\)", "", kk@result$Description)
+kk@result$Description=gsub(" - Homo sapiens \\(human\\)", "", kk@result$Description)
+KEGG=as.data.frame(kk)
+KEGG$geneID=as.character(sapply(KEGG$geneID,function(x)paste(rt$genes[match(strsplit(x,"/")[[1]],as.character(rt$entrezID))],collapse="/")))
+KEGG=KEGG[(KEGG$pvalue<pvalueFilter & KEGG$qvalue<qvalueFilter),]
+write.table(KEGG, file="KEGG.txt", sep="\t", quote=F, row.names = F)
+
+showNum=30
+if(nrow(KEGG)<showNum){
+  showNum=nrow(KEGG)
+}
+
+pdf(file="barplot.pdf", width=8, height=7)
+barplot(kk, drop=TRUE, showCategory=showNum, label_format=130, color=colorSel)
+dev.off()
+
+pdf(file="bubble.pdf", width = 8, height = 7)
+dotplot(kk, showCategory=showNum, orderBy="GeneRatio", label_format=130, color=colorSel)
+dev.off()
+
+category.col=c("#AE1F63FF", "#79CC3DFF", "#CC99FFFF", "#99CCFFFF", "#FF9900FF")
+KEGG=na.omit(KEGG)
+data=KEGG[order(KEGG$pvalue),]
+datasig=data[data$pvalue<0.05,,drop=F]
+data=KEGG %>% group_by(category) %>% slice_head(n=6)
+main.col = category.col[as.numeric(as.factor(data$category))]
+
+BgGene = as.numeric(sapply(strsplit(data$BgRatio,"/"),'[',1))
+Gene = as.numeric(sapply(strsplit(data$GeneRatio,'/'),'[',1))
+ratio = Gene/BgGene
+logpvalue = -log(data$pvalue,10)
+logpvalue.col = brewer.pal(n = 6, name = "Reds")
+f = colorRamp2(breaks = c(0,1,2,3,4,5), colors = logpvalue.col)
+BgGene.col = f(logpvalue)
+df = data.frame(GO=data$ID,start=1,end=max(BgGene))
+rownames(df) = df$GO
+bed2 = data.frame(GO=data$ID,start=1,end=BgGene,BgGene=BgGene,BgGene.col=BgGene.col)
+bed3 = data.frame(GO=data$ID,start=1,end=Gene,BgGene=Gene)
+bed4 = data.frame(GO=data$ID,start=1,end=max(BgGene),ratio=ratio,col=main.col)
+bed4$ratio = bed4$ratio/max(bed4$ratio)*9.5
+
+pdf("KEGG.circlize.pdf",width=10,height=10)
+par(omi=c(0.1,0.1,0.1,1.5))
+circos.par(track.margin=c(0.01,0.01))
+circos.genomicInitialize(df,plotType="none")
+circos.trackPlotRegion(ylim = c(0, 1), panel.fun = function(x, y) {
+  sector.index = get.cell.meta.data("sector.index")
+  xlim = get.cell.meta.data("xlim")
+  ylim = get.cell.meta.data("ylim")
+  circos.text(mean(xlim), mean(ylim), sector.index, cex = 0.8, facing = "bending.inside", niceFacing = TRUE)
+}, track.height = 0.08, bg.border = NA,bg.col = main.col)
+
+for(si in get.all.sector.index()) {
+  circos.axis(h = "top", labels.cex = 0.6, sector.index = si,track.index = 1,
+              major.at=seq(0,max(BgGene),by=100),labels.facing = "clockwise")
+}
+f = colorRamp2(breaks = c(-1, 0, 1), colors = c("green", "black", "red"))
+circos.genomicTrack(bed2, ylim = c(0, 1),track.height = 0.1,bg.border="white",
+                    panel.fun = function(region, value, ...) {
+                      i = getI(...)
+                      circos.genomicRect(region, value, ytop = 0, ybottom = 1, col = value[,2], 
+                                         border = NA, ...)
+                      circos.genomicText(region, value, y = 0.4, labels = value[,1], adj=0,cex=0.8,...)
+                    })
+circos.genomicTrack(bed3, ylim = c(0, 1),track.height = 0.1,bg.border="white",
+                    panel.fun = function(region, value, ...) {
+                      i = getI(...)
+                      circos.genomicRect(region, value, ytop = 0, ybottom = 1, col = '#BA55D3', 
+                                         border = NA, ...)
+                      circos.genomicText(region, value, y = 0.4, labels = value[,1], cex=0.9,adj=0,...)
+                    })
+circos.genomicTrack(bed4, ylim = c(0, 10),track.height = 0.35,bg.border="white",bg.col="grey90",
+                    panel.fun = function(region, value, ...) {
+                      cell.xlim = get.cell.meta.data("cell.xlim")
+                      cell.ylim = get.cell.meta.data("cell.ylim")
+                      for(j in 1:9) {
+                        y = cell.ylim[1] + (cell.ylim[2]-cell.ylim[1])/10*j
+                        circos.lines(cell.xlim, c(y, y), col = "#FFFFFF", lwd = 0.3)
+                      }
+                      circos.genomicRect(region, value, ytop = 0, ybottom = value[,1], col = value[,2], 
+                                         border = NA, ...)
+                      #circos.genomicText(region, value, y = 0.3, labels = value[,1], ...)
+                    })
+circos.clear()
+
+middle.legend = Legend(
+  labels = c('Number of Genes','Number of Select','Rich Factor(0-1)'),
+  type="points",pch=c(15,15,17),legend_gp = gpar(col=c('pink','#BA55D3',category.col[1])),
+  title="",nrow=3,size= unit(3, "mm")
+)
+circle_size = unit(1, "snpc")
+draw(middle.legend,x=circle_size*0.42)
+main.legend = Legend(
+  labels = gsub("Environmental Information Processing", "EIP", unique(data$category)),  type="points",pch=15,
+  legend_gp = gpar(col=category.col), title_position = "topcenter",
+  title = "category", nrow = 5,size = unit(3, "mm"),grid_height = unit(5, "mm"),
+  grid_width = unit(5, "mm")
+)
+logp.legend = Legend(
+  labels=c('(0,1]','(1,2]','(2,3]','(3,4]','(4,5]','>=5'),
+  type="points",pch=16,legend_gp=gpar(col=logpvalue.col),title="-log10(Pvalue)",
+  title_position = "topcenter",grid_height = unit(5, "mm"),grid_width = unit(5, "mm"),
+  size = unit(3, "mm")
+)
+lgd = packLegend(main.legend,logp.legend)
+circle_size = unit(1, "snpc")
+print(circle_size)
+draw(lgd, x = circle_size*0.85, y=circle_size*0.55,just = "left")
+dev.off()
+
+
+
+
+
+
+
+# 9.Drug-Gene Interactions
+
+library("clusterProfiler")  
+library("org.Hs.eg.db")     
+library("enrichplot")       
+library("ggplot2")          
+library("DOSE")
+library("ggraph")
+library("igraph")
+library("tidygraph")
+library("viridis")
+library("ggrepel")
+library("RColorBrewer")
+
+
+pvalueFilter <- 0.05      
+adjPvalFilter <- 0.05     
+colorSel <- "p.adjust"
+if(adjPvalFilter > 0.05){
+  colorSel <- "pvalue"
+}
+
+
+drugFile <- "DSigDB_All_detailed.txt"      
+hubFile <- "hubGene.csv"                   
+setwd("")      
+
+rt <- read.csv(hubFile, header=T, sep=",", check.names=F)
+genes <- unique(as.vector(rt[,"name"]))
+drugRT <- read.table(drugFile, header=T, sep="\t", check.names=F, quote="", comment.char="")
+drugRT <- drugRT[,1:2]
+
+kk <- enricher(genes,
+               pvalueCutoff=1, qvalueCutoff=1,
+               minGSSize = 10, maxGSSize = 500,
+               TERM2GENE=drugRT)
+
+DRUG <- as.data.frame(kk)
+DRUG <- DRUG[(DRUG$pvalue < pvalueFilter & DRUG$p.adjust < adjPvalFilter),]
+write.table(DRUG[,-c(3,4)], file="DRUG.enrich.xls", sep="\t", quote=F, row.names = F)
+
+showNum <- 30
+if(nrow(DRUG) < showNum){
+  showNum <- nrow(DRUG)
+}
+
+
+pdf(file="barplot.pdf", width=7, height=7)
+barplot(kk, drop=TRUE, showCategory=showNum, label_format=100, color=colorSel)
+dev.off()
+
+pdf(file="bubble.pdf", width=7, height=7)
+dotplot(kk, showCategory=showNum, orderBy="GeneRatio", label_format=100, color=colorSel)
+dev.off()
+
+pdf(file="cnetplot_basic.pdf", width=12, height=10)
+cnet <- cnetplot(kk, 
+                 circular=FALSE,
+                 showCategory=10, 
+                 colorEdge=TRUE,
+                 cex_label_category=1.2,
+                 cex_label_gene=0.8,
+                 node_label="all")
+print(cnet)
+dev.off()
+
+enrich_result <- as.data.frame(kk)
+enrich_result <- enrich_result[1:min(10, nrow(enrich_result)),]
+
+edges <- data.frame()
+for(i in 1:nrow(enrich_result)) {
+  drug <- enrich_result$ID[i]
+  gene_list <- strsplit(enrich_result$geneID[i], "/")[[1]]
+  temp_edges <- data.frame(
+    from = drug,
+    to = gene_list,
+    p.adjust = enrich_result$p.adjust[i],
+    stringsAsFactors = FALSE
+  )
+  edges <- rbind(edges, temp_edges)
+}
+drugs <- unique(edges$from)
+genes <- unique(edges$to)
+nodes <- data.frame(
+  name = c(drugs, genes),
+  type = c(rep("Drug", length(drugs)), rep("Gene", length(genes))),
+  stringsAsFactors = FALSE
+)
+
+drug_pvalues <- enrich_result[match(drugs, enrich_result$ID), "p.adjust"]
+nodes$p.adjust <- NA
+nodes$p.adjust[nodes$type == "Drug"] <- drug_pvalues
+
+g <- graph_from_data_frame(edges, directed=FALSE, vertices=nodes)
+
+set.seed(123)
+layout <- layout_with_fr(g)
+pdf(file="network_publication_quality.pdf", width=14, height=12, family="sans")
+
+p1 <- ggraph(g, layout = layout) +
+  geom_edge_link(alpha = 0.4,
+                 colour = "grey70",
+                 width = 0.8,
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 3)),
+                  alpha = 0.9) +
+  geom_node_text(aes(label = name),
+                 size = 3.5,
+                 repel = TRUE,
+                 box.padding = 0.5,
+                 point.padding = 0.3,
+                 segment.color = "grey50",
+                 segment.size = 0.3,
+                 max.overlaps = 20) +
+  scale_color_manual(values = c("Drug" = "#E64B35", "Gene" = "#4DBBD5"),
+                     name = "Node Type",
+                     labels = c("Drug (Compound)", "Gene (Target Protein)")) +
+  scale_size_continuous(range = c(4, 12), 
+                        name = "Drug Significance\n-log10(p.adjust)",
+                        breaks = c(1.3, 2, 3),
+                        labels = c("p < 0.05", "p < 0.01", "p < 0.001")) +
+  theme_void() +
+  theme(legend.position = "right",
+        legend.box = "vertical",
+        legend.margin = margin(10, 10, 10, 10),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Drug-Gene Interaction Network",
+       subtitle = "Top 10 enriched drugs and their target genes") +
+  guides(color = guide_legend(order = 1, override.aes = list(size = 6)),
+         size = guide_legend(order = 2))
+
+print(p1)
+dev.off()
+pdf(file="network_circular.pdf", width=14, height=14, family="sans")
+
+layout_circular <- layout_in_circle(g)
+
+p2 <- ggraph(g, layout = layout_circular) +
+  geom_edge_arc(aes(edge_colour = ..index..),
+                alpha = 0.5,
+                strength = 0.3,
+                width = 0.8,
+                show.legend = FALSE) +
+  scale_edge_color_gradient(low = "#91BFDB", high = "#FC8D59") +
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 3)),
+                  alpha = 0.9) +
+  geom_node_text(aes(label = name),
+                 size = 3,
+                 repel = FALSE,
+                 nudge_x = ifelse(nodes$type == "Drug", 0.15, 0.1) * cos(seq(0, 2*pi, length.out = nrow(nodes))),
+                 nudge_y = ifelse(nodes$type == "Drug", 0.15, 0.1) * sin(seq(0, 2*pi, length.out = nrow(nodes))),
+                 check_overlap = FALSE) +
+  scale_color_manual(values = c("Drug" = "#D62728", "Gene" = "#1F77B4"),
+                     name = "Node Type",
+                     labels = c("Drug/Compound", "Target Gene/Protein")) +
+  scale_size_continuous(range = c(4, 14), 
+                        name = "Significance\n-log10(p.adjust)",
+                        breaks = c(1.3, 2, 3),
+                        labels = c("p < 0.05", "p < 0.01", "p < 0.001")) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Drug-Gene Circular Network") +
+  guides(color = guide_legend(order = 1, ncol = 2),
+         size = guide_legend(order = 2, ncol = 3))
+
+print(p2)
+dev.off()
+pdf(file="network_bipartite.pdf", width=16, height=10, family="sans")
+
+layout_bipartite <- layout_as_bipartite(g, types = V(g)$type == "Drug")
+edge_df <- as_data_frame(g, what = "edges")
+edge_counts <- table(edge_df$from)
+
+p3 <- ggraph(g, layout = layout_bipartite) +
+  geom_edge_diagonal(aes(edge_colour = ..index..),
+                     alpha = 0.5,
+                     width = 1,
+                     show.legend = FALSE) +
+  scale_edge_color_viridis() +
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 4)),
+                  alpha = 0.9) +
+  geom_node_label(aes(label = name,
+                      fill = type),
+                  color = "white",
+                  size = 3.5,
+                  label.padding = unit(0.3, "lines"),
+                  label.size = 0,
+                  alpha = 0.9) +
+  scale_color_manual(values = c("Drug" = "#E74C3C", "Gene" = "#3498DB"),
+                     name = "Node Type",
+                     labels = c("Drug/Compound", "Target Gene/Protein")) +
+  scale_fill_manual(values = c("Drug" = "#E74C3C", "Gene" = "#3498DB"),
+                    guide = "none") +
+  scale_size_continuous(range = c(6, 16), 
+                        name = "Drug Significance\n-log10(p.adjust)",
+                        breaks = c(1.3, 2, 3, 4),
+                        labels = c("p < 0.05", "p < 0.01", "p < 0.001", "p < 0.0001")) +
+  theme_void() +
+  coord_flip() +
+  theme(legend.position = "top",
+        legend.box = "horizontal",
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Drug-Gene Bipartite Network",
+       subtitle = "Drugs on the left, target genes on the right") +
+  guides(color = guide_legend(order = 1),
+         size = guide_legend(order = 2))
+
+print(p3)
+dev.off()
+
+pdf(file="network_with_significance.pdf", width=14, height=12, family="sans")
+nodes$significance <- ifelse(nodes$type == "Drug" & !is.na(nodes$p.adjust),
+                             ifelse(nodes$p.adjust < 0.001, "***",
+                                    ifelse(nodes$p.adjust < 0.01, "**",
+                                           ifelse(nodes$p.adjust < 0.05, "*", ""))),
+                             "")
+drug_gene_count <- table(edges$from)
+nodes$gene_count <- 0
+nodes$gene_count[match(names(drug_gene_count), nodes$name)] <- as.numeric(drug_gene_count)
+V(g)$significance <- nodes$significance
+
+p4 <- ggraph(g, layout = layout) +
+  geom_edge_link(alpha = 0.6,
+                 colour = "grey60",
+                 width = 1,
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 3)),
+                  alpha = 0.9,
+                  shape = 21,
+                  stroke = 2,
+                  fill = "white") +
+  geom_node_text(aes(label = paste0(name, significance)),
+                 size = 3.5,
+                 repel = TRUE,
+                 box.padding = 0.5,
+                 point.padding = 0.3,
+                 segment.color = "grey50",
+                 segment.size = 0.3,
+                 fontface = ifelse(nodes$type == "Drug", "bold", "plain")) +
+  scale_color_manual(values = c("Drug" = "#FF6B6B", "Gene" = "#4ECDC4"),
+                     name = "Node Type",
+                     labels = c("Drug/Compound", "Target Gene/Protein")) +
+  scale_size_continuous(range = c(5, 15), 
+                        name = "Drug Significance\n-log10(p.adjust)",
+                        breaks = c(1.3, 2, 3, 4),
+                        labels = c("p < 0.05", "p < 0.01", "p < 0.001", "p < 0.0001")) +
+  theme_void() +
+  theme(legend.position = "right",
+        legend.box = "vertical",
+        legend.spacing.y = unit(0.5, "cm"),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5, face = "italic"),
+        plot.caption = element_text(size = 10, hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Drug-Gene Network with Statistical Significance",
+       subtitle = "* p < 0.05, ** p < 0.01, *** p < 0.001",
+       caption = paste0("Network contains ", length(drugs), " drugs and ", length(genes), " target genes")) +
+  guides(color = guide_legend(order = 1, override.aes = list(size = 6, shape = 19)),
+         size = guide_legend(order = 2))
+
+print(p4)
+dev.off()
+pdf(file="network_comprehensive_legend.pdf", width=16, height=14, family="sans")
+
+node_info <- nodes
+node_info$label <- ifelse(node_info$type == "Drug",
+                          paste0(node_info$name, node_info$significance),
+                          node_info$name)
+
+V(g)$label_info <- node_info$label
+V(g)$gene_count <- node_info$gene_count
+
+set.seed(456)
+layout_fr <- layout_with_fr(g, weights = rep(1, ecount(g)))
+
+edge_stats <- data.frame(
+  type = c("Drug-Gene Connection"),
+  count = nrow(edges)
+)
+
+p5 <- ggraph(g, layout = layout_fr) +
+
+  geom_edge_link(aes(alpha = 0.3 + 0.4 * (1 - p.adjust)),
+                 colour = "#7f8c8d",
+                 width = 1.2,
+                 show.legend = TRUE) +
+
+  geom_node_point(aes(size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 3)),
+                  color = "black",
+                  alpha = 0.2,
+                  position = position_nudge(x = 0.02, y = -0.02)) +
+
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", -log10(p.adjust + 1e-10), 3),
+                      shape = type),
+                  alpha = 0.95) +
+
+  geom_node_text(aes(label = label_info),
+                 size = 3,
+                 repel = TRUE,
+                 box.padding = 0.3,
+                 point.padding = 0.2,
+                 segment.color = "grey50",
+                 segment.size = 0.3,
+                 fontface = ifelse(node_info$type == "Drug", "bold", "plain")) +
+ 
+  scale_color_manual(values = c("Drug" = "#e74c3c", "Gene" = "#3498db"),
+                     name = "Node Type",
+                     labels = c("Drug/Compound", "Target Gene/Protein")) +
+
+  scale_shape_manual(values = c("Drug" = 16, "Gene" = 17),
+                     name = "Node Shape",
+                     labels = c("● Drug", "▲ Gene")) +
+
+  scale_size_continuous(range = c(4, 18), 
+                        name = "Drug Significance\n-log10(p.adjust)",
+                        breaks = c(1.3, 2, 3, 4, 5),
+                        labels = c("0.05", "0.01", "0.001", "0.0001", "<0.0001")) +
+ 
+  scale_edge_alpha_continuous(range = c(0.3, 0.7),
+                              name = "Connection Strength",
+                              guide = "none") +
+
+  annotate("text", x = Inf, y = Inf, 
+           label = paste0("Network Statistics:\n",
+                          "Total drugs: ", length(drugs), "\n",
+                          "Total genes: ", length(genes), "\n",
+                          "Total connections: ", nrow(edges), "\n",
+                          "Avg targets per drug: ", round(mean(drug_gene_count), 1)),
+           hjust = 1.1, vjust = 1.1, size = 3.5, color = "grey40",
+           lineheight = 0.8) +
+
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.background = element_rect(fill = "#f8f9fa", color = "grey80"),
+        legend.margin = margin(10, 10, 10, 10),
+        legend.title = element_text(size = 11, face = "bold"),
+        legend.text = element_text(size = 9),
+        legend.key.size = unit(0.8, "cm"),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust = 0.5),
+        plot.caption = element_text(size = 10, hjust = 0.5, color = "grey40"),
+        plot.background = element_rect(fill = "white", color = NA),
+        plot.margin = margin(20, 20, 20, 20)) +
+  labs(title = "Comprehensive Drug-Gene Interaction Network",
+       subtitle = "Visualizing drug-protein interactions with enrichment significance",
+       caption = "Significance levels: * p<0.05, ** p<0.01, *** p<0.001 | Node size reflects -log10(p.adjust)") +
+  guides(color = guide_legend(order = 1, override.aes = list(size = 8), ncol = 2),
+         shape = guide_legend(order = 2, override.aes = list(size = 8), ncol = 2),
+         size = guide_legend(order = 3, ncol = 5))
+
+print(p5)
+dev.off()
+
+pdf(file="network_simple_publication.pdf", width=10, height=10, family="sans")
+
+
+top_drugs <- enrich_result[1:min(5, nrow(enrich_result)), "ID"]
+top_edges <- edges[edges$from %in% top_drugs, ]
+top_genes <- unique(top_edges$to)
+
+
+g_sub <- subgraph(g, c(top_drugs, top_genes))
+layout_sub <- layout_with_fr(g_sub)
+
+p6 <- ggraph(g_sub, layout = layout_sub) +
+
+  geom_edge_link(alpha = 0.6,
+                 colour = "grey50",
+                 width = 1.5) +
+
+  geom_node_point(aes(color = type, 
+                      size = ifelse(type == "Drug", 8, 5)),
+                  alpha = 0.9) +
+
+  geom_node_text(aes(label = name),
+                 size = 4,
+                 repel = TRUE,
+                 box.padding = 0.5,
+                 point.padding = 0.3,
+                 fontface = ifelse(V(g_sub)$type == "Drug", "bold", "plain")) +
+
+  scale_color_manual(values = c("Drug" = "#d62728", "Gene" = "#1f77b4"),
+                     name = "",
+                     labels = c("Drug", "Gene")) +
+  scale_size_identity() +
+
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA),
+        plot.margin = margin(10, 10, 10, 10)) +
+  labs(title = "Top 5 Drug-Gene Interactions")
+
+print(p6)
+dev.off()
+
+
+
+
+
+# 10.human peripheral blood single cell RNA-seq data analysis
+
+devtools::install_github("immunogenomics/presto")
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(rlang)  
+library(presto) 
+setwd("")
+
+set.seed(42)
+
+output_dir <- "results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+log_file <- file.path(output_dir, "analysis_log.txt")
+log_con <- file(log_file, "w")
+log_message <- function(message) {
+  cat(message, "\n")
+  cat(message, "\n", file = log_con, append = TRUE)
+}
+
+custom_theme <- theme(
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  axis.title = element_text(size = 14),
+  axis.text = element_text(size = 12),
+  legend.title = element_text(size = 12),
+  legend.text = element_text(size = 10)
+)
+
+core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B", 
+                "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+
+log_message("正在加载数据...")
+
+load("SRA713577_SRS3363004.sparse .RData")
+
+if (!exists("sm")) {
+  stop("稀疏矩阵'sm'未找到，请检查RData文件内容")
+}
+
+
+log_message(paste("Expression matrix dimensions:", dim(sm)))
+
+log_message("正在加载聚类信息...")
+clusters <- read.table("SRA713577_SRS3363004.clusters .txt", header = FALSE, stringsAsFactors = FALSE)
+colnames(clusters) <- c("CellID", "Cluster")
+
+clusters$Cluster <- factor(clusters$Cluster)
+log_message(paste("Number of cells with cluster information:", nrow(clusters)))
+log_message(paste("Number of clusters:", length(unique(clusters$Cluster))))
+
+
+log_message("正在创建Seurat对象...")
+seurat_obj <- CreateSeuratObject(counts = sm, project = "SRA713577_SRS3363004")
+
+cells_in_common <- intersect(colnames(seurat_obj), clusters$CellID)
+cluster_data <- clusters[match(cells_in_common, clusters$CellID), "Cluster"]
+names(cluster_data) <- cells_in_common
+seurat_obj <- AddMetaData(seurat_obj, metadata = cluster_data, col.name = "Cluster")
+
+
+log_message(paste("Seurat对象包含", ncol(seurat_obj), "个细胞和", nrow(seurat_obj), "个基因"))
+log_message("聚类分布:")
+print(table(seurat_obj$Cluster, useNA = "ifany"))
+cat("聚类分布:", file = log_con, append = TRUE)
+capture.output(table(seurat_obj$Cluster, useNA = "ifany"), file = log_con, append = TRUE)
+
+
+log_message("过滤没有聚类信息的细胞...")
+seurat_obj <- subset(seurat_obj, subset = !is.na(Cluster))
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+
+
+log_message("数据集中的基因名称格式示例:")
+gene_examples <- head(rownames(seurat_obj), 10)
+log_message(paste(gene_examples, collapse = "\n"))
+
+
+log_message("\n为核心基因查找对应基因...")
+
+gene_map <- list()
+
+
+find_gene_in_dataset <- function(gene, all_genes) {
+  # 策略1: 精确匹配
+  if (gene %in% all_genes) {
+    log_message(paste(gene, "- 找到精确匹配"))
+    return(gene)
+  }
+  
+
+  pattern1 <- paste0("^", gene, "-")
+  matches1 <- grep(pattern1, all_genes, value = TRUE)
+  if (length(matches1) > 0) {
+    log_message(paste(gene, "- 找到前缀匹配:", matches1[1]))
+    return(matches1[1])
+  }
+
+  pattern2 <- paste0("-", gene, "-")
+  matches2 <- grep(pattern2, all_genes, value = TRUE)
+  if (length(matches2) > 0) {
+    log_message(paste(gene, "- 找到包含匹配:", matches2[1]))
+    return(matches2[1])
+  }
+  
+
+  gene_aliases <- list(
+    "RAF1" = c("C-RAF", "CRAF", "RAF"),
+    "FCGR3A" = c("CD16", "CD16A", "FCG3", "FCGR3"),
+    "COL3A1" = c("COL3A", "COL3"),
+    "FGFR1" = c("FLT2", "KAL2", "BFGFR", "FGF-R1"),
+    "CDKN1B" = c("P27", "P27KIP1", "KIP1"),
+    "KITLG" = c("SCF", "MGF", "SF", "KL"),
+    "SPARCL1" = c("SPARC-L1", "HEVIN", "SC1"),
+    "DLL4" = c("Delta4", "DELTA-LIKE4"),
+    "COL18A1" = c("COL18", "KNO", "KNO1"),
+    "FLT1" = c("VEGFR1", "VEGFR-1", "VEGFR")
+  )
+  
+  if (gene %in% names(gene_aliases)) {
+    aliases <- gene_aliases[[gene]]
+    for (alias in aliases) {
+     
+      if (alias %in% all_genes) {
+        log_message(paste(gene, "- 通过别名", alias, "找到精确匹配"))
+        return(alias)
+      }
+      
+   
+      pattern3 <- paste0("^", alias, "-")
+      matches3 <- grep(pattern3, all_genes, value = TRUE)
+      if (length(matches3) > 0) {
+        log_message(paste(gene, "- 通过别名", alias, "找到前缀匹配:", matches3[1]))
+        return(matches3[1])
+      }
+    }
+  }
+
+  matches4 <- grep(gene, all_genes, value = TRUE)
+  if (length(matches4) > 0) {
+    log_message(paste(gene, "- 找到相关基因:", matches4[1], "，可能是同一基因的不同命名"))
+    return(matches4[1])
+  }
+  
+
+  if (grepl("[0-9]+$", gene)) {
+    base_name <- gsub("[0-9]+$", "", gene)
+    family_matches <- grep(paste0("^", base_name), all_genes, value = TRUE)
+    if (length(family_matches) > 0) {
+      log_message(paste(gene, "- 未找到，但找到了同家族基因:", family_matches[1]))
+      return(family_matches[1])
+    }
+  }
+  
+
+  log_message(paste(gene, "- 未找到任何匹配，请检查基因名或考虑使用其他ID格式"))
+  return(NULL)
+}
+
+
+for (gene in core_genes) {
+  match_result <- find_gene_in_dataset(gene, rownames(seurat_obj))
+  if (!is.null(match_result)) {
+    gene_map[[gene]] <- match_result
+  }
+}
+
+
+original_to_mapped <- unlist(gene_map)
+names(original_to_mapped) <- names(gene_map)
+
+mapped_to_original <- names(original_to_mapped)
+names(mapped_to_original) <- original_to_mapped
+core_genes_in_data <- unlist(gene_map)
+
+
+gene_mapping_df <- data.frame(
+  原始基因 = names(original_to_mapped),
+  数据集中的基因 = original_to_mapped,
+  stringsAsFactors = FALSE
+)
+write.csv(gene_mapping_df, file = file.path(output_dir, "gene_mapping.csv"), row.names = FALSE)
+
+log_message(paste("\n最终找到", length(core_genes_in_data), "个核心基因可用于分析"))
+if (length(core_genes_in_data) > 0) {
+  log_message("可用基因映射:")
+  for (orig_gene in names(gene_map)) {
+    log_message(paste("  ", orig_gene, " -> ", gene_map[[orig_gene]], sep=""))
+  }
+} else {
+  log_message("警告: 未找到任何核心基因，分析将无法进行")
+  log_message("请检查数据集中的基因名称格式，或考虑使用别的基因ID系统")
+  # 如果没有找到任何基因，退出脚本
+  if (length(core_genes_in_data) == 0) {
+    close(log_con)
+    stop("没有找到任何核心基因，无法进行分析")
+  }
+}
+
+
+log_message("计算质控指标...")
+mito_genes <- grep("^MT-", rownames(seurat_obj), value = TRUE, ignore.case = TRUE)
+if (length(mito_genes) > 0) {
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = mito_genes)
+} else {
+
+  alt_mito_genes <- grep("MT-|mt-|Mito|mito", rownames(seurat_obj), value = TRUE)
+  if (length(alt_mito_genes) > 0) {
+    seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = alt_mito_genes)
+  } else {
+    log_message("警告: 未找到线粒体基因，percent.mt将不可用")
+    seurat_obj[["percent.mt"]] <- 0
+  }
+}
+
+
+log_message("生成质控指标小提琴图...")
+p1 <- VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+              group.by = "Cluster", pt.size = 0, ncol = 3) + 
+  ggtitle("QC Metrics by Cluster") + custom_theme
+ggsave(file.path(output_dir, "qc_metrics.pdf"), p1, width = 12, height = 6)
+
+
+log_message("过滤低质量细胞...")
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA > 200 & nCount_RNA > 500 & percent.mt < 15)
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+
+
+log_message("标准化数据...")
+seurat_obj <- NormalizeData(seurat_obj)
+
+log_message("鉴定高变基因...")
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+
+log_message("缩放数据...")
+# Scale all features in the object, applying regression. This ensures that
+# both VariableFeatures (for PCA) and core_genes_in_data (for heatmap) are scaled.
+seurat_obj <- ScaleData(seurat_obj, features = rownames(seurat_obj), vars.to.regress = c("nCount_RNA", "percent.mt"))
+
+log_message("运行PCA...")
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj), fast = TRUE)
+
+
+p_elbow <- ElbowPlot(seurat_obj, ndims = 50) + ggtitle("Elbow Plot for PC Selection") + custom_theme
+ggsave(file.path(output_dir, "elbow_plot.pdf"), p_elbow, width = 8, height = 6)
+
+
+n_pcs <- 20  # 根据Elbow plot调整
+log_message("对细胞进行聚类...")
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+
+log_message("运行UMAP和tSNE...")
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:n_pcs)
+
+
+Idents(seurat_obj) <- seurat_obj$Cluster
+log_message("聚类标识设置为原始聚类")
+cluster_table <- table(Idents(seurat_obj))
+print(cluster_table)
+capture.output(cluster_table, file = log_con, append = TRUE)
+
+log_message("\n=====================")
+log_message("分析核心基因表达...")
+log_message("=====================")
+
+
+if (length(core_genes_in_data) == 0) {
+  log_message("\n\n警告: 未找到任何核心基因！")
+  # 这种情况已在前面处理过，脚本会终止
+} else {
+ 
+  log_message("计算核心基因在各簇中的平均表达...")
+  avg_expr <- AggregateExpression(
+    seurat_obj, 
+    features = core_genes_in_data, 
+    group.by = "Cluster", 
+    slot = "data",
+    return.seurat = FALSE
+  )
+  
+ 
+  avg_expr_renamed <- avg_expr$RNA
+  colnames(avg_expr_renamed) <- sapply(colnames(avg_expr_renamed), function(x) {
+    if (x %in% names(mapped_to_original)) {
+      return(mapped_to_original[x])
+    } else {
+      return(x)
+    }
+  })
+  
+
+  write.csv(avg_expr_renamed, file = file.path(output_dir, "core_genes_avg_expression.csv"))
+  log_message(paste("平均表达结果已保存至", file.path(output_dir, "core_genes_avg_expression.csv")))
+  
+
+  log_message("进行差异表达分析...")
+  markers_by_cluster <- list()
+  
+  for (cluster in unique(Idents(seurat_obj))) {
+    tryCatch({
+      log_message(paste("分析簇", cluster, "的差异表达..."))
+ 
+      markers <- FindMarkers(
+        seurat_obj, 
+        ident.1 = cluster, 
+        features = core_genes_in_data,
+        min.pct = 0.05,  
+        logfc.threshold = 0.1 
+      )
+      
+      if (nrow(markers) > 0) {
+        
+        markers$original_gene <- sapply(rownames(markers), function(x) {
+          if (x %in% names(mapped_to_original)) {
+            return(mapped_to_original[x])
+          } else {
+            return(x)
+          }
+        })
+        markers$cluster <- cluster
+        markers$gene <- rownames(markers)
+        markers_by_cluster[[as.character(cluster)]] <- markers
+      }
+    }, error = function(e) {
+      log_message(paste("错误: 在分析簇", cluster, "时出错:", e$message))
+    })
+  }
+  
+
+  if (length(markers_by_cluster) > 0) {
+    all_markers <- do.call(rbind, markers_by_cluster)
+    # 重排列，使原始基因名靠前
+    all_markers <- all_markers[, c("original_gene", "gene", "cluster", 
+                                   "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")]
+    write.csv(all_markers, file = file.path(output_dir, "core_genes_de_analysis.csv"), row.names = FALSE)
+    log_message(paste("差异表达分析结果已保存至", file.path(output_dir, "core_genes_de_analysis.csv")))
+  } else {
+    log_message("警告: 未找到任何差异表达的核心基因")
+  }
+  
+
+  log_message("生成可视化...")
+  
+
+  p_umap <- DimPlot(seurat_obj, reduction = "umap", group.by = "Cluster", label = TRUE) + 
+    ggtitle("Cell Clusters (UMAP)") + custom_theme
+  
+  p_tsne <- DimPlot(seurat_obj, reduction = "tsne", group.by = "Cluster", label = TRUE) + 
+    ggtitle("Cell Clusters (t-SNE)") + custom_theme
+  
+  ggsave(file.path(output_dir, "umap_clusters.pdf"), p_umap, width = 8, height = 7)
+  ggsave(file.path(output_dir, "tsne_clusters.pdf"), p_tsne, width = 8, height = 7)
+  
+
+  p_dot <- DotPlot(seurat_obj, features = core_genes_in_data, group.by = "Cluster") + 
+    ggtitle("Core Gene Expression by Cluster") +
+    xlab("Gene") + ylab("Cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    custom_theme
+  
+
+  p_dot <- p_dot + scale_x_discrete(labels = function(x) {
+    sapply(x, function(gene) {
+      if (gene %in% names(mapped_to_original)) {
+        return(mapped_to_original[gene])
+      } else {
+        return(gene)
+      }
+    })
+  })
+  
+  ggsave(file.path(output_dir, "dotplot_core_genes.pdf"), p_dot, width = 10, height = 8)
+  
+
+  
+  log_message("生成核心基因热图...")
+
+  scaled_genes <- intersect(core_genes_in_data, rownames(GetAssayData(seurat_obj, slot = "scale.data")))
+  if(length(scaled_genes) > 0) {
+    expr_matrix <- GetAssayData(seurat_obj, slot = "scale.data")[scaled_genes, ]
+    # 使用原始基因名作为行名
+    rownames(expr_matrix) <- sapply(rownames(expr_matrix), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    
+   
+    cell_anno <- data.frame(Cluster = seurat_obj$Cluster)
+    rownames(cell_anno) <- colnames(expr_matrix)
+    
+   
+    n_clusters <- length(unique(seurat_obj$Cluster))
+    cluster_colors <- colorRampPalette(brewer.pal(min(9, n_clusters), "Set1"))(n_clusters)
+    names(cluster_colors) <- unique(seurat_obj$Cluster)
+    anno_colors <- list(Cluster = cluster_colors)
+    
+ 
+    pdf(file.path(output_dir, "heatmap_core_genes.pdf"), width = 10, height = 8)
+    pheatmap(
+      expr_matrix,
+      annotation_col = cell_anno,
+      annotation_colors = anno_colors,
+      show_colnames = FALSE,
+      cluster_rows = TRUE,
+      cluster_cols = TRUE,
+      scale = "row",
+      main = "Core Genes Expression Heatmap"
+    )
+    dev.off()
+  } else {
+    log_message("警告: 没有核心基因在缩放数据中，跳过热图生成")
+  }
+
+  violin_plots <- list()
+  for (i in 1:length(core_genes_in_data)) {
+    gene <- core_genes_in_data[i]
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    
+    tryCatch({
+      p <- VlnPlot(seurat_obj, features = gene, group.by = "Cluster", pt.size = 0) +
+        ggtitle(paste("Expression of", orig_gene, "by Cluster")) +
+        custom_theme
+      
+     
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)  
+      
+      ggsave(file.path(output_dir, paste0("violin_", clean_name, ".pdf")), p, width = 8, height = 6)
+      violin_plots[[i]] <- p
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的小提琴图时出错:", e$message))
+    })
+  }
+  
+
+  if (length(violin_plots) > 0) {
+    n_plots <- min(4, length(violin_plots))
+    combined_violin <- plot_grid(plotlist = violin_plots[1:n_plots], ncol = 2)
+    ggsave(file.path(output_dir, "combined_violin_plots.pdf"), combined_violin, width = 12, height = 10)
+  }
+  
+ 
+  for (gene in core_genes_in_data) {
+
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    
+    tryCatch({
+    
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)  
+      
+    
+      p_feat_umap <- FeaturePlot(seurat_obj, features = gene, reduction = "umap") +
+        ggtitle(paste(orig_gene, "Expression (UMAP)")) +
+        custom_theme
+      
+
+      p_feat_tsne <- FeaturePlot(seurat_obj, features = gene, reduction = "tsne") +
+        ggtitle(paste(orig_gene, "Expression (t-SNE)")) +
+        custom_theme
+      
+   
+      ggsave(file.path(output_dir, paste0("umap_", clean_name, ".pdf")), p_feat_umap, width = 8, height = 7)
+      ggsave(file.path(output_dir, paste0("tsne_", clean_name, ".pdf")), p_feat_tsne, width = 8, height = 7)
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的特征图时出错:", e$message))
+    })
+  }
+  
+  if (length(core_genes_in_data) >= 2) {
+    log_message("生成共表达散点图...")
+    
+
+    expr_data <- t(as.matrix(GetAssayData(seurat_obj, slot = "data", assay = "RNA")[core_genes_in_data, ]))
+    expr_df <- as.data.frame(expr_data)
+    
+  
+    colnames(expr_df) <- sapply(colnames(expr_df), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    
+
+    expr_df$Cluster <- seurat_obj$Cluster
+    
+
+    gene_pairs <- combn(colnames(expr_df)[colnames(expr_df) != "Cluster"], 2, simplify = FALSE)
+
+    max_plots <- min(15, length(gene_pairs))
+    
+    for (i in 1:max_plots) {
+      pair <- gene_pairs[[i]]
+      gene1 <- pair[1]
+      gene2 <- pair[2]
+      
+      tryCatch({
+        p <- ggplot(expr_df, aes(x = .data[[gene1]], y = .data[[gene2]], color = Cluster)) +
+          geom_point(alpha = 0.6, size = 1) +
+          ggtitle(paste("Co-expression of", gene1, "and", gene2)) +
+          theme_classic() +
+          custom_theme
+        
+    
+        clean_gene1 <- gsub("[^a-zA-Z0-9]", "_", gene1)
+        clean_gene2 <- gsub("[^a-zA-Z0-9]", "_", gene2)
+        ggsave(file.path(output_dir, paste0("coexp_", clean_gene1, "_", clean_gene2, ".pdf")), 
+               p, width = 8, height = 7)
+      }, error = function(e) {
+        log_message(paste("错误: 创建", gene1, "和", gene2, "的共表达图时出错:", e$message))
+      })
+    }
+  }
+  
+
+  saveRDS(seurat_obj, file = file.path(output_dir, "seurat_object.rds"))
+  log_message(paste("Seurat对象已保存至", file.path(output_dir, "seurat_object.rds")))
+}
+
+log_message("\n分析完成! 结果已保存至 " %+% output_dir)
+
+close(log_con) 
+
+
+
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(ggsci) 
+
+
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+
+log_message("\n===============================================")
+log_message("开始外周血细胞类型注释与高质量可视化...")
+log_message("===============================================")
+
+publication_theme <- theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.8, "lines")
+  )
+
+
+log_message("读取先前保存的Seurat对象...")
+seurat_obj <- readRDS(file.path(output_dir, "seurat_object.rds"))
+
+
+log_message(paste0("载入的Seurat对象包含 ", ncol(seurat_obj), " 个细胞"))
+
+
+if (!("umap" %in% names(seurat_obj@reductions)) || !("tsne" %in% names(seurat_obj@reductions))) {
+  log_message("重新运行降维...")
+  
+
+  if (!("umap" %in% names(seurat_obj@reductions))) {
+    seurat_obj <- RunUMAP(seurat_obj, dims = 1:20)
+  }
+  
+ 
+  if (!("tsne" %in% names(seurat_obj@reductions))) {
+    seurat_obj <- RunTSNE(seurat_obj, dims = 1:20)
+  }
+}
+
+
+log_message("定义外周血细胞类型映射...")
+
+cell_type_map <- c(
+  "0" = "T cells",
+  "1" = "T cells",
+  "2" = "Monocytes",
+  "3" = "Gamma delta T cells",
+  "4" = "T cells",
+  "5" = "Langerhans cells",
+  "6" = "NK cells",
+  "7" = "T cells",           
+  "8" = "B cells naive",
+  "9" = "Dendritic cells",
+  "10" = "Erythroid-like and erythroid precursor cells",
+  "11" = "Platelets",         
+  "12" = "Plasmacytoid dendritic cells"
+)
+
+
+short_labels_map <- c(
+  "T cells" = "T cells",
+  "Monocytes" = "Monocytes",
+  "Gamma delta T cells" = "γδ T cells",
+  "Langerhans cells" = "Langerhans",
+  "NK cells" = "NK cells",
+  "B cells naive" = "B cells",
+  "Dendritic cells" = "DCs",
+  "Erythroid-like and erythroid precursor cells" = "Erythroid cells",
+  "Plasmacytoid dendritic cells" = "pDCs",
+  "Platelets" = "Platelets",   # 添加Platelets
+  "Unknown" = "Unknown"
+)
+
+
+log_message("为外周血细胞添加类型注释（修复版）...")
+
+
+cell_types <- rep("Unknown", ncol(seurat_obj))
+names(cell_types) <- colnames(seurat_obj)
+
+for (i in 1:ncol(seurat_obj)) {
+  cell_id <- colnames(seurat_obj)[i]
+  cluster_id <- as.character(seurat_obj$Cluster[i])
+  
+  if (!is.na(cluster_id) && cluster_id %in% names(cell_type_map)) {
+    cell_types[cell_id] <- cell_type_map[cluster_id]
+  }
+}
+
+
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_types, col.name = "cell_type")
+
+
+cell_subtypes <- paste0(cell_types, " (", seurat_obj$Cluster, ")")
+names(cell_subtypes) <- colnames(seurat_obj)
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_subtypes, col.name = "cell_subtype")
+
+
+cell_types_short <- cell_types
+for (i in 1:length(cell_types_short)) {
+  if (cell_types_short[i] %in% names(short_labels_map)) {
+    cell_types_short[i] <- short_labels_map[cell_types_short[i]]
+  }
+}
+names(cell_types_short) <- colnames(seurat_obj)
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_types_short, col.name = "cell_type_short")
+
+
+major_immune_categories <- c(
+  "T cells" = "T cells",
+  "Gamma delta T cells" = "T cells",
+  "NK cells" = "NK & NKT cells",
+  "B cells naive" = "B cells",
+  "Monocytes" = "Myeloid cells",
+  "Dendritic cells" = "Myeloid cells",
+  "Plasmacytoid dendritic cells" = "Myeloid cells",
+  "Langerhans cells" = "Myeloid cells",
+  "Erythroid-like and erythroid precursor cells" = "Other cells",
+  "Platelets" = "Platelets",   # 添加Platelets为独立类别
+  "Unknown" = "Other cells"
+)
+
+
+log_message("添加主要免疫细胞类别分类（修复版）...")
+
+
+major_categories <- rep("Other cells", ncol(seurat_obj))
+names(major_categories) <- colnames(seurat_obj)
+
+
+for (i in 1:ncol(seurat_obj)) {
+  cell_id <- colnames(seurat_obj)[i]
+  cell_type <- seurat_obj$cell_type[i]
+  
+  if (!is.na(cell_type) && cell_type %in% names(major_immune_categories)) {
+    major_categories[cell_id] <- major_immune_categories[cell_type]
+  }
+}
+
+
+seurat_obj <- AddMetaData(seurat_obj, metadata = major_categories, col.name = "major_immune_category")
+
+log_message("主要免疫类别分布:")
+print(table(seurat_obj$major_immune_category))
+
+
+immune_category_colors <- c(
+  "T cells" = "#FF9900",
+  "NK & NKT cells" = "#FF6600",
+  "B cells" = "#3399FF",
+  "Myeloid cells" = "#33CC33",
+  "Platelets" = "#AA4499",     # 添加血小板的紫色
+  "Other cells" = "#CCCCCC"
+)
+
+# 同时更新细胞类型颜色，添加血小板颜色
+immune_colors <- c(
+  "T cells" = "#FF9900",                  # 橙色
+  "Gamma delta T cells" = "#FFCC00",      # 浅橙色
+  "NK cells" = "#FF6600",                 # 深橙色
+  "B cells naive" = "#3399FF",            # 蓝色
+  "Monocytes" = "#33CC33",                # 绿色
+  "Dendritic cells" = "#00CCCC",          # 青色
+  "Plasmacytoid dendritic cells" = "#00FFCC", # 浅青色
+  "Langerhans cells" = "#99CC00",         # 黄绿色
+  "Erythroid-like and erythroid precursor cells" = "#CC0000", # 红色
+  "Platelets" = "#AA4499",                # 紫色 (添加)
+  "Unknown" = "#CCCCCC"                   # 灰色
+)
+
+
+cell_type_colors <- immune_colors[cell_type_levels]
+
+
+cluster_ids <- sort(as.numeric(as.character(unique(seurat_obj$Cluster))))
+n_clusters <- length(cluster_ids)
+cluster_colors <- colorRampPalette(brewer.pal(min(9, n_clusters), "Set3"))(n_clusters)
+names(cluster_colors) <- as.character(cluster_ids)
+
+
+log_message("生成外周血细胞类型UMAP图...")
+p1 <- DimPlot(seurat_obj, 
+              reduction = "umap", 
+              group.by = "cell_type", 
+              cols = cell_type_colors,
+              pt.size = 0.6,
+              label = TRUE, 
+              label.size = 4, 
+              repel = TRUE) +
+  labs(title = "UMAP: Peripheral Blood Cell Types") +
+  publication_theme +
+  theme(legend.position = "right")
+
+ggsave(file.path(pub_dir, "Figure1_UMAP_CellTypes.pdf"), p1, width = 12, height = 9, dpi = 300)
+ggsave(file.path(pub_dir, "Figure1_UMAP_CellTypes.png"), p1, width = 12, height = 9, dpi = 300)
+
+
+log_message("生成外周血细胞类型tSNE图...")
+p2 <- DimPlot(seurat_obj, 
+              reduction = "tsne", 
+              group.by = "cell_type", 
+              cols = cell_type_colors,
+              pt.size = 0.6,
+              label = TRUE, 
+              label.size = 4, 
+              repel = TRUE) +
+  labs(title = "t-SNE: Peripheral Blood Cell Types") +
+  publication_theme +
+  theme(legend.position = "right")
+
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.pdf"), p2, width = 12, height = 9, dpi = 300)
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.png"), p2, width = 12, height = 9, dpi = 300)
+
+
+log_message("生成聚类与细胞类型对比图...")
+
+
+p3a <- DimPlot(seurat_obj, 
+               reduction = "umap", 
+               group.by = "Cluster", 
+               cols = cluster_colors,
+               pt.size = 0.4,
+               label = TRUE, 
+               label.size = 3.5) +
+  labs(title = "Original Clusters") +
+  publication_theme
+
+
+p3b <- DimPlot(seurat_obj, 
+               reduction = "umap", 
+               group.by = "cell_type_short", 
+               cols = cell_type_colors,
+               pt.size = 0.4,
+               label = TRUE, 
+               label.size = 3.5) +
+  labs(title = "Annotated Cell Types") +
+  publication_theme
+
+
+p3 <- p3a + p3b + plot_layout(ncol = 2, guides = "collect") 
+ggsave(file.path(pub_dir, "Figure3_Clusters_vs_CellTypes.pdf"), p3, width = 16, height = 7, dpi = 300)
+ggsave(file.path(pub_dir, "Figure3_Clusters_vs_CellTypes.png"), p3, width = 16, height = 7, dpi = 300)
+
+
+log_message("生成外周血细胞类型分布图...")
+
+
+cell_count_df <- as.data.frame(table(seurat_obj$cell_type))
+colnames(cell_count_df) <- c("CellType", "Count")
+cell_count_df$Percentage <- cell_count_df$Count / sum(cell_count_df$Count) * 100
+cell_count_df$CellType <- factor(cell_count_df$CellType, levels = cell_type_levels)
+
+
+p4 <- ggplot(cell_count_df, aes(x = reorder(CellType, -Count), y = Count, fill = CellType)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = paste0(Count, "\n(", round(Percentage, 1), "%)")), 
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = cell_type_colors) +
+  labs(title = "Peripheral Blood Cell Type Distribution", 
+       x = "Cell Type", 
+       y = "Number of Cells") +
+  publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+ggsave(file.path(pub_dir, "Figure4_CellType_Distribution.pdf"), p4, width = 12, height = 8, dpi = 300)
+ggsave(file.path(pub_dir, "Figure4_CellType_Distribution.png"), p4, width = 12, height = 8, dpi = 300)
+
+
+if (exists("core_genes_in_data") && length(core_genes_in_data) > 0) {
+  log_message("生成外周血核心基因表达图...")
+  
+
+  p5 <- DotPlot(seurat_obj, 
+                features = core_genes_in_data, 
+                group.by = "cell_type")
+  
+
+  p5 <- p5 + 
+    scale_color_viridis_c() +
+    labs(title = "Core Gene Expression by Cell Type") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title = element_text(size = 14, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  
+
+  if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+    p5 <- p5 + scale_x_discrete(labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    })
+  }
+  
+  ggsave(file.path(pub_dir, "Figure5_CoreGenes_DotPlot.pdf"), p5, width = 12, height = 8, dpi = 300)
+  ggsave(file.path(pub_dir, "Figure5_CoreGenes_DotPlot.png"), p5, width = 12, height = 8, dpi = 300)
+  
+
+  if (length(core_genes_in_data) > 0) {
+    log_message("生成核心基因表达特征图...")
+    
+
+    selected_genes <- head(core_genes_in_data, min(4, length(core_genes_in_data)))
+    feature_plots <- list()
+    
+    for (i in seq_along(selected_genes)) {
+      gene <- selected_genes[i]
+      gene_name <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+      
+      p <- FeaturePlot(seurat_obj, 
+                       features = gene, 
+                       reduction = "umap",
+                       pt.size = 0.8,
+                       order = TRUE)
+      
+
+      p <- p + 
+        scale_color_viridis_c() +
+        labs(title = paste0(gene_name, " Expression")) +
+        publication_theme
+      
+      feature_plots[[i]] <- p
+      
+ 
+      ggsave(file.path(pub_dir, paste0("Figure6_", gene_name, "_Expression.pdf")), 
+             p, width = 8, height = 7, dpi = 300)
+    }
+    
+
+    if (length(feature_plots) > 1) {
+      combined_features <- wrap_plots(feature_plots, ncol = 2)
+      ggsave(file.path(pub_dir, "Figure6_Combined_Features.pdf"), 
+             combined_features, width = 16, height = 14, dpi = 300)
+      ggsave(file.path(pub_dir, "Figure6_Combined_Features.png"), 
+             combined_features, width = 16, height = 14, dpi = 300)
+    }
+  }
+}
+
+
+log_message("鉴定外周血细胞类型标记基因...")
+
+
+old_idents <- Idents(seurat_obj)
+Idents(seurat_obj) <- "cell_type"
+
+
+cell_type_markers <- FindAllMarkers(
+  seurat_obj,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  max.cells.per.ident = 500
+)
+
+
+write.csv(cell_type_markers, 
+          file.path(output_dir, "cell_type_markers.csv"), 
+          row.names = FALSE)
+
+
+top_markers <- cell_type_markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+
+
+log_message("生成外周血细胞类型标记基因热图...")
+p7 <- DoHeatmap(seurat_obj, 
+                features = top_markers$gene, 
+                group.by = "cell_type", 
+                size = 4,
+                angle = 45) +
+  scale_fill_viridis() +
+  labs(title = "Top 5 Marker Genes per Cell Type")
+
+
+pdf(file.path(pub_dir, "Figure7_CellType_Markers_Heatmap.pdf"), width = 14, height = 10)
+print(p7)
+dev.off()
+
+
+Idents(seurat_obj) <- old_idents
+
+
+log_message("生成外周血细胞类型分割视图...")
+
+
+main_cell_types <- c("T cells", "B cells naive", "Monocytes", "Dendritic cells")
+cells_to_keep <- seurat_obj$cell_type %in% main_cell_types
+
+if (sum(cells_to_keep) > 0) {
+  seurat_subset <- subset(seurat_obj, cells = colnames(seurat_obj)[cells_to_keep])
+  
+
+  p8 <- DimPlot(seurat_subset, 
+                reduction = "umap", 
+                group.by = "Cluster", 
+                split.by = "cell_type", 
+                pt.size = 0.5,
+                ncol = 2) +
+    labs(title = "UMAP by Main Immune Cell Types") +
+    publication_theme
+  
+  ggsave(file.path(pub_dir, "Figure8_Split_UMAP_ImmuneTypes.pdf"), p8, width = 14, height = 12, dpi = 300)
+  ggsave(file.path(pub_dir, "Figure8_Split_UMAP_ImmuneTypes.png"), p8, width = 14, height = 12, dpi = 300)
+}
+
+
+log_message("生成外周血免疫细胞比例图...")
+
+
+major_immune_categories <- c(
+  "T cells" = "T cells",
+  "Gamma delta T cells" = "T cells",
+  "NK cells" = "NK & NKT cells",
+  "B cells naive" = "B cells",
+  "Monocytes" = "Myeloid cells",
+  "Dendritic cells" = "Myeloid cells",
+  "Plasmacytoid dendritic cells" = "Myeloid cells",
+  "Langerhans cells" = "Myeloid cells",
+  "Erythroid-like and erythroid precursor cells" = "Other cells",
+  "Unknown" = "Other cells"
+)
+
+
+log_message("添加主要免疫细胞类别分类...")
+
+
+major_categories <- rep("Other cells", ncol(seurat_obj))
+names(major_categories) <- colnames(seurat_obj)
+
+
+for (i in 1:ncol(seurat_obj)) {
+  cell_id <- colnames(seurat_obj)[i]
+  cell_type <- seurat_obj$cell_type[i]
+  
+  if (!is.na(cell_type) && cell_type %in% names(major_immune_categories)) {
+    major_categories[cell_id] <- major_immune_categories[cell_type]
+  }
+}
+
+
+seurat_obj <- AddMetaData(seurat_obj, metadata = major_categories, col.name = "major_immune_category")
+
+
+log_message("主要免疫类别分布:")
+print(table(seurat_obj$major_immune_category))
+
+
+immune_prop_df <- as.data.frame(table(seurat_obj$major_immune_category))
+colnames(immune_prop_df) <- c("ImmuneCategory", "Count")
+immune_prop_df$Percentage <- immune_prop_df$Count / sum(immune_prop_df$Count) * 100
+
+
+immune_category_colors <- c(
+  "T cells" = "#FF9900",
+  "NK & NKT cells" = "#FF6600",
+  "B cells" = "#3399FF",
+  "Myeloid cells" = "#33CC33",
+  "Other cells" = "#CCCCCC"
+)
+
+
+p9 <- ggplot(immune_prop_df, aes(x = "", y = Percentage, fill = ImmuneCategory)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = immune_category_colors) +
+  labs(title = "Peripheral Blood Immune Cell Proportions",
+       fill = "Cell Category") +
+  theme_void() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+
+ggsave(file.path(pub_dir, "Figure9_ImmuneCell_Proportions.pdf"), p9, width = 10, height = 8, dpi = 300)
+ggsave(file.path(pub_dir, "Figure9_ImmuneCell_Proportions.png"), p9, width = 10, height = 8, dpi = 300)
+
+log_message("生成外周血细胞分析综合总结图...")
+
+
+p10a <- DimPlot(seurat_obj, 
+                reduction = "umap", 
+                group.by = "cell_type_short", 
+                cols = cell_type_colors,
+                pt.size = 0.4, 
+                label = TRUE, 
+                label.size = 3) +
+  labs(title = "UMAP") +
+  theme(legend.position = "none")
+
+
+p10b <- DimPlot(seurat_obj, 
+                reduction = "tsne", 
+                group.by = "cell_type_short", 
+                cols = cell_type_colors,
+                pt.size = 0.4, 
+                label = TRUE, 
+                label.size = 3) +
+  labs(title = "t-SNE") +
+  theme(legend.position = "none")
+
+
+p10c <- plot_grid(
+  p4 + theme(legend.position = "none") + labs(title = "Cell Counts"),
+  p9 + theme(legend.position = "none") + labs(title = "Cell Proportions"),
+  ncol = 2
+)
+
+
+p10 <- (p10a | p10b) / p10c
+ggsave(file.path(pub_dir, "Figure10_Summary.pdf"), p10, width = 16, height = 16, dpi = 300)
+ggsave(file.path(pub_dir, "Figure10_Summary.png"), p10, width = 16, height = 16, dpi = 300)
+
+
+log_message("保存注释后的外周血细胞Seurat对象...")
+saveRDS(seurat_obj, file.path(output_dir, "seurat_object_annotated.rds"))
+
+log_message("===================================================")
+log_message("外周血细胞类型注释与高质量可视化完成!")
+log_message(paste0("所有图形已保存至: ", pub_dir))
+log_message("===================================================")
+
+log_message("生成核心基因表达的发表级点图...")
+
+library(ggplot2)
+library(viridis)
+library(scales)
+library(cowplot)
+
+
+if (!exists("seurat_obj") || !inherits(seurat_obj, "Seurat")) {
+  seurat_obj <- readRDS(file.path(output_dir, "seurat_object_annotated.rds"))
+}
+
+
+if (!exists("core_genes_in_data") || length(core_genes_in_data) == 0) {
+  if (file.exists(file.path(output_dir, "gene_mapping.csv"))) {
+    gene_mapping_df <- read.csv(file.path(output_dir, "gene_mapping.csv"))
+    core_genes_in_data <- as.character(gene_mapping_df$数据集中的基因)
+    mapped_to_original <- gene_mapping_df$原始基因
+    names(mapped_to_original) <- core_genes_in_data
+  } else {
+    log_message("Warning: No gene mapping found, using default core genes")
+    core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B", 
+                    "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+    core_genes_in_data <- core_genes[core_genes %in% rownames(seurat_obj)]
+  }
+}
+
+
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+
+dotplot_theme <- theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(1, "cm"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+
+
+p_dotplot1 <- DotPlot(
+  seurat_obj,
+  features = core_genes_in_data,
+  group.by = "cell_type",
+  dot.scale = 8,
+  dot.min = 0,
+  cols = c("lightgrey", "#0072B2")
+) +
+  scale_color_viridis_c(option = "D") +
+  labs(
+    title = "Expression Pattern of Core Genes in Peripheral Blood Cell Types",
+    x = "Core Genes",
+    y = "Cell Types",
+    color = "Average Expression",
+    size = "Percent Expressed"
+  ) +
+  dotplot_theme
+
+p_dotplot2 <- DotPlot(
+  seurat_obj,
+  features = core_genes_in_data,
+  group.by = "major_immune_category",
+  dot.scale = 8,
+  dot.min = 0,
+  cols = c("lightgrey", "#0072B2")
+) +
+  scale_color_viridis_c(option = "D") +
+  labs(
+    title = "Expression Pattern of Core Genes in Major Immune Cell Categories",
+    x = "Core Genes",
+    y = "Immune Cell Categories",
+    color = "Average Expression",
+    size = "Percent Expressed"
+  ) +
+  dotplot_theme
+
+
+if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+  p_dotplot1 <- p_dotplot1 + scale_x_discrete(
+    labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    }
+  )
+  
+  p_dotplot2 <- p_dotplot2 + scale_x_discrete(
+    labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    }
+  )
+}
+
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_CellTypes.pdf"),
+  p_dotplot1, 
+  width = 12, 
+  height = 8, 
+  dpi = 300
+)
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_CellTypes.png"),
+  p_dotplot1, 
+  width = 12, 
+  height = 8, 
+  dpi = 300
+)
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_ImmuneCategories.pdf"),
+  p_dotplot2, 
+  width = 12, 
+  height = 6, 
+  dpi = 300
+)
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_ImmuneCategories.png"),
+  p_dotplot2, 
+  width = 12, 
+  height = 6, 
+  dpi = 300
+)
+
+
+library(patchwork)
+p_combined <- p_dotplot1 / p_dotplot2 + plot_layout(heights = c(1.5, 1))
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_Combined.pdf"),
+  p_combined, 
+  width = 12, 
+  height = 14, 
+  dpi = 300
+)
+
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_Combined.png"),
+  p_combined, 
+  width = 12, 
+  height = 14, 
+  dpi = 300
+)
+
+
+
+
+# 11.human malignant melanoma single cell RNA-seq data analysis
+devtools::install_github("immunogenomics/presto")
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(rlang)
+library(presto)
+setwd("")
+set.seed(42)
+output_dir <- "results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+log_file <- file.path(output_dir, "analysis_log.txt")
+log_con <- file(log_file, "w")
+log_message <- function(message) {
+  cat(message, "\n")
+  cat(message, "\n", file = log_con, append = TRUE)
+}
+custom_theme <- theme(
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  axis.title = element_text(size = 14),
+  axis.text = element_text(size = 12),
+  legend.title = element_text(size = 12),
+  legend.text = element_text(size = 10)
+)
+core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B",
+                "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+log_message("正在加载数据...")
+load("SRA640903_SRS2780388.sparse.RData")
+if (!exists("sm")) {
+  stop("稀疏矩阵'sm'未找到，请检查RData文件内容")
+}
+log_message(paste("Expression matrix dimensions:", dim(sm)))
+log_message("正在加载聚类信息...")
+clusters <- read.table("SRA640903_SRS2780388.clusters.txt", header = FALSE, stringsAsFactors = FALSE)
+colnames(clusters) <- c("CellID", "Cluster")
+clusters$Cluster <- factor(clusters$Cluster)
+log_message(paste("Number of cells with cluster information:", nrow(clusters)))
+log_message(paste("Number of clusters:", length(unique(clusters$Cluster))))
+log_message("正在创建Seurat对象...")
+seurat_obj <- CreateSeuratObject(counts = sm, project = "SRA640903_SRS2780388")
+cells_in_common <- intersect(colnames(seurat_obj), clusters$CellID)
+cluster_data <- clusters[match(cells_in_common, clusters$CellID), "Cluster"]
+names(cluster_data) <- cells_in_common
+seurat_obj <- AddMetaData(seurat_obj, metadata = cluster_data, col.name = "Cluster")
+log_message(paste("Seurat对象包含", ncol(seurat_obj), "个细胞和", nrow(seurat_obj), "个基因"))
+log_message("聚类分布:")
+print(table(seurat_obj$Cluster, useNA = "ifany"))
+cat("聚类分布:", file = log_con, append = TRUE)
+capture.output(table(seurat_obj$Cluster, useNA = "ifany"), file = log_con, append = TRUE)
+log_message("过滤没有聚类信息的细胞...")
+seurat_obj <- subset(seurat_obj, subset = !is.na(Cluster))
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+log_message("数据集中的基因名称格式示例:")
+gene_examples <- head(rownames(seurat_obj), 10)
+log_message(paste(gene_examples, collapse = "\n"))
+log_message("\n为核心基因查找对应基因...")
+gene_map <- list()
+find_gene_in_dataset <- function(gene, all_genes) {
+  if (gene %in% all_genes) {
+    log_message(paste(gene, "- 找到精确匹配"))
+    return(gene)
+  }
+  pattern1 <- paste0("^", gene, "-")
+  matches1 <- grep(pattern1, all_genes, value = TRUE)
+  if (length(matches1) > 0) {
+    log_message(paste(gene, "- 找到前缀匹配:", matches1[1]))
+    return(matches1[1])
+  }
+  pattern2 <- paste0("-", gene, "-")
+  matches2 <- grep(pattern2, all_genes, value = TRUE)
+  if (length(matches2) > 0) {
+    log_message(paste(gene, "- 找到包含匹配:", matches2[1]))
+    return(matches2[1])
+  }
+  gene_aliases <- list(
+    "RAF1" = c("C-RAF", "CRAF", "RAF"),
+    "FCGR3A" = c("CD16", "CD16A", "FCG3", "FCGR3"),
+    "COL3A1" = c("COL3A", "COL3"),
+    "FGFR1" = c("FLT2", "KAL2", "BFGFR", "FGF-R1"),
+    "CDKN1B" = c("P27", "P27KIP1", "KIP1"),
+    "KITLG" = c("SCF", "MGF", "SF", "KL"),
+    "SPARCL1" = c("SPARC-L1", "HEVIN", "SC1"),
+    "DLL4" = c("Delta4", "DELTA-LIKE4"),
+    "COL18A1" = c("COL18", "KNO", "KNO1"),
+    "FLT1" = c("VEGFR1", "VEGFR-1", "VEGFR")
+  )
+  if (gene %in% names(gene_aliases)) {
+    aliases <- gene_aliases[[gene]]
+    for (alias in aliases) {
+      if (alias %in% all_genes) {
+        log_message(paste(gene, "- 通过别名", alias, "找到精确匹配"))
+        return(alias)
+      }
+      pattern3 <- paste0("^", alias, "-")
+      matches3 <- grep(pattern3, all_genes, value = TRUE)
+      if (length(matches3) > 0) {
+        log_message(paste(gene, "- 通过别名", alias, "找到前缀匹配:", matches3[1]))
+        return(matches3[1])
+      }
+    }
+  }
+  matches4 <- grep(gene, all_genes, value = TRUE)
+  if (length(matches4) > 0) {
+    log_message(paste(gene, "- 找到相关基因:", matches4[1], "，可能是同一基因的不同命名"))
+    return(matches4[1])
+  }
+  if (grepl("[0-9]+$", gene)) {
+    base_name <- gsub("[0-9]+$", "", gene)
+    family_matches <- grep(paste0("^", base_name), all_genes, value = TRUE)
+    if (length(family_matches) > 0) {
+      log_message(paste(gene, "- 未找到，但找到了同家族基因:", family_matches[1]))
+      return(family_matches[1])
+    }
+  }
+  log_message(paste(gene, "- 未找到任何匹配，请检查基因名或考虑使用其他ID格式"))
+  return(NULL)
+}
+for (gene in core_genes) {
+  match_result <- find_gene_in_dataset(gene, rownames(seurat_obj))
+  if (!is.null(match_result)) {
+    gene_map[[gene]] <- match_result
+  }
+}
+original_to_mapped <- unlist(gene_map)
+names(original_to_mapped) <- names(gene_map)
+mapped_to_original <- names(original_to_mapped)
+names(mapped_to_original) <- original_to_mapped
+core_genes_in_data <- unlist(gene_map)
+gene_mapping_df <- data.frame(
+  原始基因 = names(original_to_mapped),
+  数据集中的基因 = original_to_mapped,
+  stringsAsFactors = FALSE
+)
+write.csv(gene_mapping_df, file = file.path(output_dir, "gene_mapping.csv"), row.names = FALSE)
+log_message(paste("\n最终找到", length(core_genes_in_data), "个核心基因可用于分析"))
+if (length(core_genes_in_data) > 0) {
+  log_message("可用基因映射:")
+  for (orig_gene in names(gene_map)) {
+    log_message(paste("  ", orig_gene, " -> ", gene_map[[orig_gene]], sep=""))
+  }
+} else {
+  log_message("警告: 未找到任何核心基因，分析将无法进行")
+  log_message("请检查数据集中的基因名称格式，或考虑使用别的基因ID系统")
+  if (length(core_genes_in_data) == 0) {
+    close(log_con)
+    stop("没有找到任何核心基因，无法进行分析")
+  }
+}
+log_message("计算质控指标...")
+mito_genes <- grep("^MT-", rownames(seurat_obj), value = TRUE, ignore.case = TRUE)
+if (length(mito_genes) > 0) {
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = mito_genes)
+} else {
+  alt_mito_genes <- grep("MT-|mt-|Mito|mito", rownames(seurat_obj), value = TRUE)
+  if (length(alt_mito_genes) > 0) {
+    seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = alt_mito_genes)
+  } else {
+    log_message("警告: 未找到线粒体基因，percent.mt将不可用")
+    seurat_obj[["percent.mt"]] <- 0
+  }
+}
+log_message("生成质控指标小提琴图...")
+p1 <- VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+              group.by = "Cluster", pt.size = 0, ncol = 3) +
+  ggtitle("QC Metrics by Cluster") + custom_theme
+ggsave(file.path(output_dir, "qc_metrics.pdf"), p1, width = 12, height = 6)
+log_message("过滤低质量细胞...")
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA > 200 & nCount_RNA > 500 & percent.mt < 15)
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+log_message("标准化数据...")
+seurat_obj <- NormalizeData(seurat_obj)
+log_message("鉴定高变基因...")
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+log_message("缩放数据...")
+seurat_obj <- ScaleData(seurat_obj, features = rownames(seurat_obj), vars.to.regress = c("nCount_RNA", "percent.mt"))
+log_message("运行PCA...")
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj), fast = TRUE)
+p_elbow <- ElbowPlot(seurat_obj, ndims = 50) + ggtitle("Elbow Plot for PC Selection") + custom_theme
+ggsave(file.path(output_dir, "elbow_plot.pdf"), p_elbow, width = 8, height = 6)
+n_pcs <- 20
+log_message("对细胞进行聚类...")
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+log_message("运行UMAP和tSNE...")
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:n_pcs)
+Idents(seurat_obj) <- seurat_obj$Cluster
+log_message("聚类标识设置为原始聚类")
+cluster_table <- table(Idents(seurat_obj))
+print(cluster_table)
+capture.output(cluster_table, file = log_con, append = TRUE)
+log_message("\n=====================")
+log_message("分析核心基因表达...")
+log_message("=====================")
+if (length(core_genes_in_data) == 0) {
+  log_message("\n\n警告: 未找到任何核心基因！")
+} else {
+  log_message("计算核心基因在各簇中的平均表达...")
+  avg_expr <- AggregateExpression(
+    seurat_obj,
+    features = core_genes_in_data,
+    group.by = "Cluster",
+    slot = "data",
+    return.seurat = FALSE
+  )
+  avg_expr_renamed <- avg_expr$RNA
+  colnames(avg_expr_renamed) <- sapply(colnames(avg_expr_renamed), function(x) {
+    if (x %in% names(mapped_to_original)) {
+      return(mapped_to_original[x])
+    } else {
+      return(x)
+    }
+  })
+  write.csv(avg_expr_renamed, file = file.path(output_dir, "core_genes_avg_expression.csv"))
+  log_message(paste("平均表达结果已保存至", file.path(output_dir, "core_genes_avg_expression.csv")))
+  log_message("进行差异表达分析...")
+  markers_by_cluster <- list()
+  for (cluster in unique(Idents(seurat_obj))) {
+    tryCatch({
+      log_message(paste("分析簇", cluster, "的差异表达..."))
+      markers <- FindMarkers(
+        seurat_obj,
+        ident.1 = cluster,
+        features = core_genes_in_data,
+        min.pct = 0.05,
+        logfc.threshold = 0.1
+      )
+      if (nrow(markers) > 0) {
+        markers$original_gene <- sapply(rownames(markers), function(x) {
+          if (x %in% names(mapped_to_original)) {
+            return(mapped_to_original[x])
+          } else {
+            return(x)
+          }
+        })
+        markers$cluster <- cluster
+        markers$gene <- rownames(markers)
+        markers_by_cluster[[as.character(cluster)]] <- markers
+      }
+    }, error = function(e) {
+      log_message(paste("错误: 在分析簇", cluster, "时出错:", e$message))
+    })
+  }
+  if (length(markers_by_cluster) > 0) {
+    all_markers <- do.call(rbind, markers_by_cluster)
+    all_markers <- all_markers[, c("original_gene", "gene", "cluster",
+                                   "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")]
+    write.csv(all_markers, file = file.path(output_dir, "core_genes_de_analysis.csv"), row.names = FALSE)
+    log_message(paste("差异表达分析结果已保存至", file.path(output_dir, "core_genes_de_analysis.csv")))
+  } else {
+    log_message("警告: 未找到任何差异表达的核心基因")
+  }
+  log_message("生成可视化...")
+  p_umap <- DimPlot(seurat_obj, reduction = "umap", group.by = "Cluster", label = TRUE) +
+    ggtitle("Cell Clusters (UMAP)") + custom_theme
+  p_tsne <- DimPlot(seurat_obj, reduction = "tsne", group.by = "Cluster", label = TRUE) +
+    ggtitle("Cell Clusters (t-SNE)") + custom_theme
+  ggsave(file.path(output_dir, "umap_clusters.pdf"), p_umap, width = 8, height = 7)
+  ggsave(file.path(output_dir, "tsne_clusters.pdf"), p_tsne, width = 8, height = 7)
+  p_dot <- DotPlot(seurat_obj, features = core_genes_in_data, group.by = "Cluster") +
+    ggtitle("Core Gene Expression by Cluster") +
+    xlab("Gene") + ylab("Cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    custom_theme
+  p_dot <- p_dot + scale_x_discrete(labels = function(x) {
+    sapply(x, function(gene) {
+      if (gene %in% names(mapped_to_original)) {
+        return(mapped_to_original[gene])
+      } else {
+        return(gene)
+      }
+    })
+  })
+  ggsave(file.path(output_dir, "dotplot_core_genes.pdf"), p_dot, width = 10, height = 8)
+  log_message("生成核心基因热图...")
+  scaled_genes <- intersect(core_genes_in_data, rownames(GetAssayData(seurat_obj, slot = "scale.data")))
+  if(length(scaled_genes) > 0) {
+    expr_matrix <- GetAssayData(seurat_obj, slot = "scale.data")[scaled_genes, ]
+    rownames(expr_matrix) <- sapply(rownames(expr_matrix), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    cell_anno <- data.frame(Cluster = seurat_obj$Cluster)
+    rownames(cell_anno) <- colnames(expr_matrix)
+    n_clusters <- length(unique(seurat_obj$Cluster))
+    cluster_colors <- colorRampPalette(brewer.pal(min(9, n_clusters), "Set1"))(n_clusters)
+    names(cluster_colors) <- unique(seurat_obj$Cluster)
+    anno_colors <- list(Cluster = cluster_colors)
+    pdf(file.path(output_dir, "heatmap_core_genes.pdf"), width = 10, height = 8)
+    pheatmap(
+      expr_matrix,
+      annotation_col = cell_anno,
+      annotation_colors = anno_colors,
+      show_colnames = FALSE,
+      cluster_rows = TRUE,
+      cluster_cols = TRUE,
+      scale = "row",
+      main = "Core Genes Expression Heatmap"
+    )
+    dev.off()
+  } else {
+    log_message("警告: 没有核心基因在缩放数据中，跳过热图生成")
+  }
+  violin_plots <- list()
+  for (i in 1:length(core_genes_in_data)) {
+    gene <- core_genes_in_data[i]
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    tryCatch({
+      p <- VlnPlot(seurat_obj, features = gene, group.by = "Cluster", pt.size = 0) +
+        ggtitle(paste("Expression of", orig_gene, "by Cluster")) +
+        custom_theme
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)
+      ggsave(file.path(output_dir, paste0("violin_", clean_name, ".pdf")), p, width = 8, height = 6)
+      violin_plots[[i]] <- p
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的小提琴图时出错:", e$message))
+    })
+  }
+  if (length(violin_plots) > 0) {
+    n_plots <- min(4, length(violin_plots))
+    combined_violin <- plot_grid(plotlist = violin_plots[1:n_plots], ncol = 2)
+    ggsave(file.path(output_dir, "combined_violin_plots.pdf"), combined_violin, width = 12, height = 10)
+  }
+  for (gene in core_genes_in_data) {
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    tryCatch({
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)
+      p_feat_umap <- FeaturePlot(seurat_obj, features = gene, reduction = "umap") +
+        ggtitle(paste(orig_gene, "Expression (UMAP)")) +
+        custom_theme
+      p_feat_tsne <- FeaturePlot(seurat_obj, features = gene, reduction = "tsne") +
+        ggtitle(paste(orig_gene, "Expression (t-SNE)")) +
+        custom_theme
+      ggsave(file.path(output_dir, paste0("umap_", clean_name, ".pdf")), p_feat_umap, width = 8, height = 7)
+      ggsave(file.path(output_dir, paste0("tsne_", clean_name, ".pdf")), p_feat_tsne, width = 8, height = 7)
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的特征图时出错:", e$message))
+    })
+  }
+  if (length(core_genes_in_data) >= 2) {
+    log_message("生成共表达散点图...")
+    expr_data <- t(as.matrix(GetAssayData(seurat_obj, slot = "data", assay = "RNA")[core_genes_in_data, ]))
+    expr_df <- as.data.frame(expr_data)
+    colnames(expr_df) <- sapply(colnames(expr_df), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    expr_df$Cluster <- seurat_obj$Cluster
+    gene_pairs <- combn(colnames(expr_df)[colnames(expr_df) != "Cluster"], 2, simplify = FALSE)
+    max_plots <- min(15, length(gene_pairs))
+    for (i in 1:max_plots) {
+      pair <- gene_pairs[[i]]
+      gene1 <- pair[1]
+      gene2 <- pair[2]
+      tryCatch({
+        p <- ggplot(expr_df, aes(x = .data[[gene1]], y = .data[[gene2]], color = Cluster)) +
+          geom_point(alpha = 0.6, size = 1) +
+          ggtitle(paste("Co-expression of", gene1, "and", gene2)) +
+          theme_classic() +
+          custom_theme
+        clean_gene1 <- gsub("[^a-zA-Z0-9]", "_", gene1)
+        clean_gene2 <- gsub("[^a-zA-Z0-9]", "_", gene2)
+        ggsave(file.path(output_dir, paste0("coexp_", clean_gene1, "_", clean_gene2, ".pdf")),
+               p, width = 8, height = 7)
+      }, error = function(e) {
+        log_message(paste("错误: 创建", gene1, "和", gene2, "的共表达图时出错:", e$message))
+      })
+    }
+  }
+  saveRDS(seurat_obj, file = file.path(output_dir, "seurat_object.rds"))
+  log_message(paste("Seurat对象已保存至", file.path(output_dir, "seurat_object.rds")))
+}
+log_message("\n分析完成! 结果已保存至 " %+% output_dir)
+close(log_con)
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(rlang)
+library(presto)
+library(ggpubr)
+library(patchwork)
+library(viridis)
+library(ggsci)
+library(ggrepel)
+setwd("")
+set.seed(42)
+output_dir <- "results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+figures_dir <- file.path(output_dir, "figures")
+if (!dir.exists(figures_dir)) {
+  dir.create(figures_dir)
+}
+options(repr.plot.width = 12, repr.plot.height = 10, repr.plot.res = 300)
+seurat_obj <- readRDS(file.path(output_dir, "seurat_object.rds"))
+print("Seurat对象的元数据列名：")
+print(colnames(seurat_obj@meta.data))
+print("聚类信息：")
+print(table(seurat_obj$Cluster))
+cell_type_mapping <- c(
+  "0" = "Unknown",
+  "1" = "Basal cells",
+  "2" = "Basal cells",
+  "3" = "Basal cells",
+  "4" = "Basal cells",
+  "5" = "Basal cells",
+  "6" = "Basal cells",
+  "7" = "Unknown"
+)
+cell_subtype_mapping <- c(
+  "0" = "Unknown",
+  "1" = "Basal-subtype-1",
+  "2" = "Basal-subtype-2",
+  "3" = "Basal-subtype-3",
+  "4" = "Basal-subtype-4",
+  "5" = "Basal-subtype-5",
+  "6" = "Basal-subtype-6",
+  "7" = "Unknown"
+)
+cell_types <- character(ncol(seurat_obj))
+cell_subtypes <- character(ncol(seurat_obj))
+names(cell_types) <- colnames(seurat_obj)
+names(cell_subtypes) <- colnames(seurat_obj)
+for (cell in colnames(seurat_obj)) {
+  cluster <- as.character(seurat_obj$Cluster[cell])
+  if (cluster %in% names(cell_type_mapping)) {
+    cell_types[cell] <- cell_type_mapping[cluster]
+    cell_subtypes[cell] <- cell_subtype_mapping[cluster]
+  } else {
+    cell_types[cell] <- "Unknown"
+    cell_subtypes[cell] <- "Unknown"
+  }
+}
+seurat_obj@meta.data$cell_type <- cell_types
+seurat_obj@meta.data$cell_subtype <- cell_subtypes
+print("细胞类型分布：")
+print(table(seurat_obj$cell_type))
+print("细胞亚型分布：")
+print(table(seurat_obj$cell_subtype))
+cell_type_colors <- c(
+  "Basal cells" = "#E64B35B2",
+  "Unknown" = "#91D1C2B2"
+)
+subtype_colors <- c(
+  "Basal-subtype-1" = "#FFA07A",
+  "Basal-subtype-2" = "#FA8072",
+  "Basal-subtype-3" = "#E9967A",
+  "Basal-subtype-4" = "#F08080",
+  "Basal-subtype-5" = "#CD5C5C",
+  "Basal-subtype-6" = "#DC143C",
+  "Unknown" = "#91D1C2B2"
+)
+journal_theme <- theme(
+  panel.background = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black", linewidth = 1),
+  axis.title = element_text(size = 14, face = "bold"),
+  axis.text = element_text(size = 12, color = "black"),
+  legend.title = element_text(size = 12, face = "bold"),
+  legend.text = element_text(size = 10),
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+p1 <- DimPlot(seurat_obj,
+              reduction = "umap",
+              group.by = "cell_type",
+              cols = cell_type_colors,
+              pt.size = 0.8,
+              label = FALSE) +
+  journal_theme +
+  ggtitle("UMAP projection colored by cell type") +
+  xlab("UMAP_1") +
+  ylab("UMAP_2")
+ggsave(file.path(figures_dir, "Figure_1_UMAP_cell_types.pdf"),
+       p1, width = 8, height = 7, dpi = 300)
+p2 <- DimPlot(seurat_obj,
+              reduction = "umap",
+              group.by = "cell_subtype",
+              cols = subtype_colors,
+              pt.size = 0.8,
+              label = TRUE,
+              label.size = 3) +
+  journal_theme +
+  ggtitle("UMAP projection colored by cell subtype") +
+  xlab("UMAP_1") +
+  ylab("UMAP_2")
+ggsave(file.path(figures_dir, "Figure_2_UMAP_cell_subtypes.pdf"),
+       p2, width = 10, height = 8, dpi = 300)
+subtype_df <- data.frame(table(seurat_obj$cell_subtype))
+colnames(subtype_df) <- c("Cell_Subtype", "Count")
+subtype_df$Percentage <- subtype_df$Count / sum(subtype_df$Count) * 100
+p3 <- ggplot(subtype_df, aes(x = reorder(Cell_Subtype, -Count), y = Count, fill = Cell_Subtype)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = paste0(Count, "\n(", round(Percentage, 1), "%)")),
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = subtype_colors) +
+  journal_theme +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Cell Subtype") +
+  ylab("Number of Cells") +
+  ggtitle("Cell Subtype Distribution") +
+  ylim(0, max(subtype_df$Count) * 1.2)
+ggsave(file.path(figures_dir, "Figure_3_cell_subtype_distribution.pdf"),
+       p3, width = 10, height = 7, dpi = 300)
+if (file.exists(file.path(output_dir, "gene_mapping.csv"))) {
+  gene_mapping_df <- read.csv(file.path(output_dir, "gene_mapping.csv"))
+  core_genes_in_data <- gene_mapping_df$数据集中的基因
+} else {
+  core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B",
+                  "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+  core_genes_in_data <- core_genes[core_genes %in% rownames(seurat_obj)]
+}
+if (length(core_genes_in_data) > 0) {
+  p4 <- DotPlot(seurat_obj,
+                features = core_genes_in_data,
+                group.by = "cell_subtype") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),
+          axis.text.y = element_text(size = 10, face = "bold"),
+          legend.position = "right",
+          legend.title = element_text(size = 12, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+    ggtitle("Core Genes Expression by Cell Subtype")
+  if (exists("gene_mapping_df")) {
+    p4 <- p4 + scale_x_discrete(labels = gene_mapping_df$原始基因[match(core_genes_in_data, gene_mapping_df$数据集中的基因)])
+  }
+  ggsave(file.path(figures_dir, "Figure_4_dot_plot_subtypes.pdf"),
+         p4, width = 12, height = 7, dpi = 300)
+  avg_expr <- AverageExpression(seurat_obj,
+                                features = core_genes_in_data,
+                                group.by = "cell_subtype",
+                                assays = "RNA")$RNA
+  if (exists("gene_mapping_df")) {
+    rownames(avg_expr) <- gene_mapping_df$原始基因[match(rownames(avg_expr), gene_mapping_df$数据集中的基因)]
+  }
+  scaled_expr <- t(scale(t(avg_expr)))
+  anno_df <- data.frame(Cell_Type = ifelse(grepl("Basal", colnames(scaled_expr)), "Basal cells", "Unknown"))
+  rownames(anno_df) <- colnames(scaled_expr)
+  anno_colors <- list(Cell_Type = c("Basal cells" = "#E64B35B2", "Unknown" = "#91D1C2B2"))
+  pdf(file.path(figures_dir, "Figure_5_heatmap_subtypes.pdf"), width = 10, height = 9)
+  pheatmap(scaled_expr,
+           color = colorRampPalette(rev(brewer.pal(11, "RdBu")))(100),
+           border_color = NA,
+           clustering_method = "ward.D2",
+           annotation_col = anno_df,
+           annotation_colors = anno_colors,
+           fontsize = 12,
+           fontsize_row = 14,
+           fontsize_col = 12,
+           main = "Core Genes Expression Heatmap by Subtype",
+           angle_col = 45,
+           display_numbers = TRUE,
+           number_format = "%.2f",
+           fontsize_number = 10)
+  dev.off()
+}
+p_combined <- (p1 | p2) / p3
+ggsave(file.path(figures_dir, "Figure_6_combined_subtype_analysis.pdf"),
+       p_combined, width = 16, height = 14, dpi = 300)
+Idents(seurat_obj) <- seurat_obj$cell_subtype
+subtype_markers <- FindAllMarkers(seurat_obj,
+                                  only.pos = TRUE,
+                                  min.pct = 0.25,
+                                  logfc.threshold = 0.25)
+write.csv(subtype_markers,
+          file.path(output_dir, "subtype_markers.csv"),
+          row.names = FALSE)
+top_markers <- subtype_markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+pdf(file.path(figures_dir, "Figure_7_subtype_markers_heatmap.pdf"), width = 12, height = 10)
+DoHeatmap(seurat_obj,
+          features = unique(top_markers$gene),
+          group.by = "cell_subtype",
+          group.colors = subtype_colors) +
+  theme(text = element_text(size = 12))
+dev.off()
+saveRDS(seurat_obj, file.path(output_dir, "seurat_object_annotated.rds"))
+summary_stats <- data.frame(
+  Metric = c("Total Cells", "Main Cell Types", "Cell Subtypes",
+             "Genes Detected", "Average UMI per Cell", "Core Genes Found"),
+  Value = c(ncol(seurat_obj),
+            length(unique(seurat_obj$cell_type)),
+            length(unique(seurat_obj$cell_subtype)),
+            nrow(seurat_obj),
+            round(mean(seurat_obj$nCount_RNA), 2),
+            if(exists("core_genes_in_data")) length(core_genes_in_data) else 0)
+)
+write.csv(summary_stats,
+          file.path(output_dir, "analysis_summary.csv"),
+          row.names = FALSE)
+p8a <- DimPlot(seurat_obj,
+               reduction = "tsne",
+               group.by = "cell_type",
+               cols = cell_type_colors,
+               pt.size = 0.8,
+               label = FALSE) +
+  journal_theme +
+  ggtitle("t-SNE projection colored by cell type") +
+  xlab("tSNE_1") +
+  ylab("tSNE_2")
+ggsave(file.path(figures_dir, "Figure_8a_tSNE_cell_types.pdf"),
+       p8a, width = 8, height = 7, dpi = 300)
+p8b <- DimPlot(seurat_obj,
+               reduction = "tsne",
+               group.by = "cell_subtype",
+               cols = subtype_colors,
+               pt.size = 0.8,
+               label = TRUE,
+               label.size = 3) +
+  journal_theme +
+  ggtitle("t-SNE projection colored by cell subtype") +
+  xlab("tSNE_1") +
+  ylab("tSNE_2")
+ggsave(file.path(figures_dir, "Figure_8b_tSNE_cell_subtypes.pdf"),
+       p8b, width = 10, height = 8, dpi = 300)
+p8c <- DimPlot(seurat_obj,
+               reduction = "tsne",
+               group.by = "Cluster",
+               label = TRUE,
+               label.size = 5,
+               pt.size = 0.5) +
+  journal_theme +
+  ggtitle("t-SNE projection colored by original clusters") +
+  xlab("tSNE_1") +
+  ylab("tSNE_2")
+ggsave(file.path(figures_dir, "Figure_8c_tSNE_clusters.pdf"),
+       p8c, width = 8, height = 7, dpi = 300)
+p_umap_tsne_comparison <- (p1 + ggtitle("UMAP")) | (p8a + ggtitle("t-SNE"))
+ggsave(file.path(figures_dir, "Figure_9_UMAP_vs_tSNE_comparison.pdf"),
+       p_umap_tsne_comparison, width = 16, height = 7, dpi = 300)
+if (length(core_genes_in_data) > 0) {
+  selected_genes_tsne <- head(core_genes_in_data, 4)
+  tsne_feature_plots <- list()
+  for (i in seq_along(selected_genes_tsne)) {
+    gene <- selected_genes_tsne[i]
+    if (exists("gene_mapping_df")) {
+      orig_gene <- gene_mapping_df$原始基因[gene_mapping_df$数据集中的基因 == gene]
+    } else {
+      orig_gene <- gene
+    }
+    p <- FeaturePlot(seurat_obj,
+                     features = gene,
+                     reduction = "tsne",
+                     cols = c("lightgrey", "red"),
+                     pt.size = 0.5) +
+      journal_theme +
+      ggtitle(paste(orig_gene, "Expression (t-SNE)")) +
+      theme(legend.position = "right",
+            legend.key.height = unit(1, "cm"))
+    tsne_feature_plots[[i]] <- p
+  }
+  p10 <- wrap_plots(tsne_feature_plots, ncol = 2)
+  ggsave(file.path(figures_dir, "Figure_10_tSNE_feature_plots.pdf"),
+         p10, width = 12, height = 12, dpi = 300)
+}
+p_comprehensive <- (p5a + ggtitle("UMAP - Original Clusters")) +
+  (p1 + ggtitle("UMAP - Cell Types")) +
+  (p2 + ggtitle("UMAP - Cell Subtypes")) +
+  (p8c + ggtitle("t-SNE - Original Clusters")) +
+  (p8a + ggtitle("t-SNE - Cell Types")) +
+  (p8b + ggtitle("t-SNE - Cell Subtypes")) +
+  plot_layout(ncol = 3, nrow = 2)
+ggsave(file.path(figures_dir, "Figure_11_comprehensive_comparison.pdf"),
+       p_comprehensive, width = 24, height = 16, dpi = 300)
+main_figure <- (p1 | p8a) / (p2 | p8b) / p3
+ggsave(file.path(figures_dir, "Figure_12_main_presentation.pdf"),
+       main_figure, width = 16, height = 20, dpi = 300)
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(RColorBrewer)
+output_dir <- "results"
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+seurat_obj <- readRDS(file.path(output_dir, "seurat_object_annotated.rds"))
+publication_theme <- theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.8, "lines")
+  )
+cell_type_colors <- c(
+  "Basal cells" = "#E64B35B2",
+  "Unknown" = "#91D1C2B2"
+)
+cell_type_levels <- unique(seurat_obj$cell_type)
+seurat_obj$cell_type <- factor(seurat_obj$cell_type, levels = cell_type_levels)
+log_message <- function(msg) {
+  cat(paste0("[", Sys.time(), "] ", msg, "\n"))
+}
+log_message("生成黑色素瘤细胞类型tSNE图...")
+p2 <- DimPlot(seurat_obj,
+              reduction = "tsne",
+              group.by = "cell_type",
+              cols = cell_type_colors,
+              pt.size = 0.6,
+              label = TRUE,
+              label.size = 4,
+              repel = TRUE) +
+  labs(title = "t-SNE: Melanoma Cell Types") +
+  publication_theme +
+  theme(legend.position = "right")
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.pdf"),
+       p2,
+       width = 12,
+       height = 9,
+       dpi = 300)
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.png"),
+       p2,
+       width = 12,
+       height = 9,
+       dpi = 300)
+log_message("Figure2_tSNE_CellTypes.pdf 生成完成！")
+log_message(paste0("文件保存位置: ", file.path(pub_dir, "Figure2_tSNE_CellTypes.pdf")))
+p2_no_label <- DimPlot(seurat_obj,
+                       reduction = "tsne",
+                       group.by = "cell_type",
+                       cols = cell_type_colors,
+                       pt.size = 0.6,
+                       label = FALSE) +
+  labs(title = "t-SNE: Melanoma Cell Types") +
+  publication_theme +
+  theme(legend.position = "right")
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes_no_label.pdf"),
+       p2_no_label,
+       width = 12,
+       height = 9,
+       dpi = 300)
+if ("cell_subtype" %in% colnames(seurat_obj@meta.data)) {
+  subtype_colors <- c(
+    "Basal-subtype-1" = "#FFA07A",
+    "Basal-subtype-2" = "#FA8072",
+    "Basal-subtype-3" = "#E9967A",
+    "Basal-subtype-4" = "#F08080",
+    "Basal-subtype-5" = "#CD5C5C",
+    "Basal-subtype-6" = "#DC143C",
+    "Unknown" = "#91D1C2B2"
+  )
+  p2_subtype <- DimPlot(seurat_obj,
+                        reduction = "tsne",
+                        group.by = "cell_subtype",
+                        cols = subtype_colors,
+                        pt.size = 0.6,
+                        label = TRUE,
+                        label.size = 3.5,
+                        repel = TRUE) +
+    labs(title = "t-SNE: Melanoma Cell Subtypes") +
+    publication_theme +
+    theme(legend.position = "right")
+  ggsave(file.path(pub_dir, "Figure2_tSNE_CellSubtypes.pdf"),
+         p2_subtype,
+         width = 12,
+         height = 9,
+         dpi = 300)
+  log_message("Figure2_tSNE_CellSubtypes.pdf 也已生成！")
+}
+log_message("细胞类型分布统计:")
+cell_type_table <- table(seurat_obj$cell_type)
+cell_type_df <- data.frame(
+  CellType = names(cell_type_table),
+  Count = as.numeric(cell_type_table),
+  Percentage = round(as.numeric(cell_type_table) / sum(cell_type_table) * 100, 2)
+)
+print(cell_type_df)
+log_message("===================================================")
+log_message("t-SNE细胞类型可视化完成!")
+log_message("===================================================")
+log_message("生成核心基因表达的发表级点图...")
+library(ggplot2)
+library(viridis)
+library(scales)
+library(cowplot)
+if (!exists("seurat_obj") || !inherits(seurat_obj, "Seurat")) {
+  seurat_obj <- readRDS(file.path(output_dir, "seurat_object_annotated.rds"))
+}
+if (!exists("core_genes_in_data") || length(core_genes_in_data) == 0) {
+  if (file.exists(file.path(output_dir, "gene_mapping.csv"))) {
+    gene_mapping_df <- read.csv(file.path(output_dir, "gene_mapping.csv"))
+    core_genes_in_data <- as.character(gene_mapping_df$数据集中的基因)
+    mapped_to_original <- gene_mapping_df$原始基因
+    names(mapped_to_original) <- core_genes_in_data
+  } else {
+    log_message("Warning: No gene mapping found, using default core genes")
+    core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B",
+                    "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+    core_genes_in_data <- core_genes[core_genes %in% rownames(seurat_obj)]
+  }
+}
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+dotplot_theme <- theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(1, "cm"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+p_dotplot <- DotPlot(
+  seurat_obj,
+  features = core_genes_in_data,
+  group.by = "cell_type",
+  dot.scale = 8,
+  dot.min = 0,
+  cols = c("lightgrey", "#0072B2")
+) +
+  scale_color_viridis_c(option = "D") +
+  labs(
+    title = "Expression Pattern of Core Genes in Melanoma Cell Types",
+    x = "Core Genes",
+    y = "Cell Types",
+    color = "Average Expression",
+    size = "Percent Expressed"
+  ) +
+  dotplot_theme
+if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+  p_dotplot <- p_dotplot + scale_x_discrete(
+    labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    }
+  )
+}
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes.pdf"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes.png"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+log_message("高质量核心基因点图已保存至publication_figures文件夹")
+p_dotplot <- DotPlot(
+  seurat_obj,
+  features = core_genes_in_data,
+  group.by = "cell_subtype",
+  dot.scale = 8,
+  dot.min = 0,
+  cols = c("lightgrey", "#0072B2")
+) +
+  scale_color_viridis_c(option = "D") +
+  labs(
+    title = "Expression Pattern of Core Genes in Melanoma Cell Subtypes",
+    x = "Core Genes",
+    y = "Cell Subtypes",
+    color = "Average Expression",
+    size = "Percent Expressed"
+  ) +
+  dotplot_theme
+if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+  p_dotplot <- p_dotplot + scale_x_discrete(
+    labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    }
+  )
+}
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_Subtypes.pdf"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes_Subtypes.png"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+pdf(file.path(pub_dir, "Publication_DotPlot_CoreGenes_Subtypes.pdf"),
+    width = 12, height = 8)
+print(p_dotplot)
+dev.off()
+
+
+
+
+
+# 12.skin (rat) single cell RNA-seq data analysis
+
+devtools::install_github("immunogenomics/presto")
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(rlang)
+library(presto)
+setwd("E:\\多组学eQTLpQTLSMR 与共定位\\孟德尔随机化+网络药理学+单细胞测序的文章套路\\213.MRomics资料1\\21.PanglaoDB\\皮肤（鼠）")
+set.seed(42)
+output_dir <- "results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+log_file <- file.path(output_dir, "analysis_log.txt")
+log_con <- file(log_file, "w")
+log_message <- function(message) {
+  cat(message, "\n")
+  cat(message, "\n", file = log_con, append = TRUE)
+}
+custom_theme <- theme(
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  axis.title = element_text(size = 14),
+  axis.text = element_text(size = 12),
+  legend.title = element_text(size = 12),
+  legend.text = element_text(size = 10)
+)
+core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B",
+                "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+log_message("正在加载数据...")
+load("SRA802096_SRS4005009.sparse.RData")
+if (!exists("sm")) {
+  stop("稀疏矩阵'sm'未找到，请检查RData文件内容")
+}
+log_message(paste("Expression matrix dimensions:", dim(sm)))
+log_message("正在加载聚类信息...")
+clusters <- read.table("SRA802096_SRS4005009.clusters.txt", header = FALSE, stringsAsFactors = FALSE)
+colnames(clusters) <- c("CellID", "Cluster")
+clusters$Cluster <- factor(clusters$Cluster)
+log_message(paste("Number of cells with cluster information:", nrow(clusters)))
+log_message(paste("Number of clusters:", length(unique(clusters$Cluster))))
+log_message("正在创建Seurat对象...")
+seurat_obj <- CreateSeuratObject(counts = sm, project = "SRA802096_SRS4005009")
+cells_in_common <- intersect(colnames(seurat_obj), clusters$CellID)
+cluster_data <- clusters[match(cells_in_common, clusters$CellID), "Cluster"]
+names(cluster_data) <- cells_in_common
+seurat_obj <- AddMetaData(seurat_obj, metadata = cluster_data, col.name = "Cluster")
+log_message(paste("Seurat对象包含", ncol(seurat_obj), "个细胞和", nrow(seurat_obj), "个基因"))
+log_message("聚类分布:")
+print(table(seurat_obj$Cluster, useNA = "ifany"))
+cat("聚类分布:", file = log_con, append = TRUE)
+capture.output(table(seurat_obj$Cluster, useNA = "ifany"), file = log_con, append = TRUE)
+log_message("过滤没有聚类信息的细胞...")
+seurat_obj <- subset(seurat_obj, subset = !is.na(Cluster))
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+log_message("数据集中的基因名称格式示例:")
+gene_examples <- head(rownames(seurat_obj), 10)
+log_message(paste(gene_examples, collapse = "\n"))
+log_message("\n为核心基因查找对应基因...")
+gene_map <- list()
+human_to_mouse_map <- list(
+  "RAF1"    = c("Raf1"),
+  "FCGR3A"  = c("Fcgr3", "Fcgr4"),
+  "COL3A1"  = c("Col3a1"),
+  "FGFR1"   = c("Fgfr1"),
+  "CDKN1B"  = c("Cdkn1b"),
+  "KITLG"   = c("Kitl", "Kitlg"),
+  "SPARCL1" = c("Sparcl1"),
+  "DLL4"    = c("Dll4"),
+  "COL18A1" = c("Col18a1"),
+  "FLT1"    = c("Flt1", "Vegfr1")
+)
+find_gene_in_dataset <- function(human_gene, all_genes) {
+  mouse_ortholog_candidates <- human_to_mouse_map[[human_gene]]
+  if (is.null(mouse_ortholog_candidates) || length(mouse_ortholog_candidates) == 0) {
+    log_message(paste(human_gene, "- No mouse ortholog defined or found in the map."))
+    return(NULL)
+  }
+  for (mouse_sym in mouse_ortholog_candidates) {
+    pattern_prefix <- paste0("^", mouse_sym, "(-|$)")
+    matches_prefix <- grep(pattern_prefix, all_genes, value = TRUE, ignore.case = TRUE)
+    if (length(matches_prefix) > 0) {
+      log_message(paste(human_gene, "(human) ->", mouse_sym, "(mouse) - Found as prefix in:", matches_prefix[1]))
+      return(matches_prefix[1])
+    }
+    matches_contain <- grep(mouse_sym, all_genes, value = TRUE, ignore.case = TRUE)
+    if (length(matches_contain) > 0) {
+      log_message(paste(human_gene, "(human) ->", mouse_sym, "(mouse) - Found by general containment (fallback) in:", matches_contain[1], ". Please verify this match."))
+      return(matches_contain[1])
+    }
+  }
+  log_message(paste(human_gene, "(human) - No match found for its mouse ortholog(s) [", paste(mouse_ortholog_candidates, collapse=", "), "] in dataset gene names."))
+  return(NULL)
+}
+for (gene in core_genes) {
+  match_result <- find_gene_in_dataset(gene, rownames(seurat_obj))
+  if (!is.null(match_result)) {
+    gene_map[[gene]] <- match_result
+  }
+}
+original_to_mapped <- unlist(gene_map)
+names(original_to_mapped) <- names(gene_map)
+mapped_to_original <- names(original_to_mapped)
+names(mapped_to_original) <- original_to_mapped
+core_genes_in_data <- unlist(gene_map)
+gene_mapping_df <- data.frame(
+  原始基因 = names(original_to_mapped),
+  数据集中的基因 = original_to_mapped,
+  stringsAsFactors = FALSE
+)
+write.csv(gene_mapping_df, file = file.path(output_dir, "gene_mapping.csv"), row.names = FALSE)
+log_message(paste("\n最终找到", length(core_genes_in_data), "个核心基因可用于分析"))
+if (length(core_genes_in_data) > 0) {
+  log_message("可用基因映射:")
+  for (orig_gene in names(gene_map)) {
+    log_message(paste("  ", orig_gene, " -> ", gene_map[[orig_gene]], sep=""))
+  }
+} else {
+  log_message("警告: 未找到任何核心基因，分析将无法进行")
+  log_message("请检查数据集中的基因名称格式，或考虑使用别的基因ID系统")
+  if (length(core_genes_in_data) == 0) {
+    close(log_con)
+    stop("没有找到任何核心基因，无法进行分析")
+  }
+}
+log_message("计算质控指标...")
+mito_genes <- grep("^MT-", rownames(seurat_obj), value = TRUE, ignore.case = TRUE)
+if (length(mito_genes) > 0) {
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = mito_genes)
+} else {
+  alt_mito_genes <- grep("MT-|mt-|Mito|mito", rownames(seurat_obj), value = TRUE)
+  if (length(alt_mito_genes) > 0) {
+    seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, features = alt_mito_genes)
+  } else {
+    log_message("警告: 未找到线粒体基因，percent.mt将不可用")
+    seurat_obj[["percent.mt"]] <- 0
+  }
+}
+log_message("生成质控指标小提琴图...")
+p1 <- VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+              group.by = "Cluster", pt.size = 0, ncol = 3) +
+  ggtitle("QC Metrics by Cluster") + custom_theme
+ggsave(file.path(output_dir, "qc_metrics.pdf"), p1, width = 12, height = 6)
+log_message("过滤低质量细胞...")
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA > 200 & nCount_RNA > 500 & percent.mt < 15)
+log_message(paste("过滤后剩余", ncol(seurat_obj), "个细胞"))
+log_message("标准化数据...")
+seurat_obj <- NormalizeData(seurat_obj)
+log_message("鉴定高变基因...")
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+log_message("缩放数据...")
+seurat_obj <- ScaleData(seurat_obj, features = rownames(seurat_obj), vars.to.regress = c("nCount_RNA", "percent.mt"))
+log_message("运行PCA...")
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj), fast = TRUE)
+p_elbow <- ElbowPlot(seurat_obj, ndims = 50) + ggtitle("Elbow Plot for PC Selection") + custom_theme
+ggsave(file.path(output_dir, "elbow_plot.pdf"), p_elbow, width = 8, height = 6)
+n_pcs <- 20
+log_message("对细胞进行聚类...")
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+log_message("运行UMAP和tSNE...")
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:n_pcs)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:n_pcs)
+Idents(seurat_obj) <- seurat_obj$Cluster
+log_message("聚类标识设置为原始聚类")
+cluster_table <- table(Idents(seurat_obj))
+print(cluster_table)
+capture.output(cluster_table, file = log_con, append = TRUE)
+log_message("\n=====================")
+log_message("分析核心基因表达...")
+log_message("=====================")
+if (length(core_genes_in_data) == 0) {
+  log_message("\n\n警告: 未找到任何核心基因！")
+} else {
+  log_message("计算核心基因在各簇中的平均表达...")
+  avg_expr <- AggregateExpression(
+    seurat_obj,
+    features = core_genes_in_data,
+    group.by = "Cluster",
+    slot = "data",
+    return.seurat = FALSE
+  )
+  avg_expr_renamed <- avg_expr$RNA
+  colnames(avg_expr_renamed) <- sapply(colnames(avg_expr_renamed), function(x) {
+    if (x %in% names(mapped_to_original)) {
+      return(mapped_to_original[x])
+    } else {
+      return(x)
+    }
+  })
+  write.csv(avg_expr_renamed, file = file.path(output_dir, "core_genes_avg_expression.csv"))
+  log_message(paste("平均表达结果已保存至", file.path(output_dir, "core_genes_avg_expression.csv")))
+  log_message("进行差异表达分析...")
+  markers_by_cluster <- list()
+  for (cluster in unique(Idents(seurat_obj))) {
+    tryCatch({
+      log_message(paste("分析簇", cluster, "的差异表达..."))
+      markers <- FindMarkers(
+        seurat_obj,
+        ident.1 = cluster,
+        features = core_genes_in_data,
+        min.pct = 0.05,
+        logfc.threshold = 0.1
+      )
+      if (nrow(markers) > 0) {
+        markers$original_gene <- sapply(rownames(markers), function(x) {
+          if (x %in% names(mapped_to_original)) {
+            return(mapped_to_original[x])
+          } else {
+            return(x)
+          }
+        })
+        markers$cluster <- cluster
+        markers$gene <- rownames(markers)
+        markers_by_cluster[[as.character(cluster)]] <- markers
+      }
+    }, error = function(e) {
+      log_message(paste("错误: 在分析簇", cluster, "时出错:", e$message))
+    })
+  }
+  if (length(markers_by_cluster) > 0) {
+    all_markers <- do.call(rbind, markers_by_cluster)
+    all_markers <- all_markers[, c("original_gene", "gene", "cluster",
+                                   "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")]
+    write.csv(all_markers, file = file.path(output_dir, "core_genes_de_analysis.csv"), row.names = FALSE)
+    log_message(paste("差异表达分析结果已保存至", file.path(output_dir, "core_genes_de_analysis.csv")))
+  } else {
+    log_message("警告: 未找到任何差异表达的核心基因")
+  }
+  log_message("生成可视化...")
+  p_umap <- DimPlot(seurat_obj, reduction = "umap", group.by = "Cluster", label = TRUE) +
+    ggtitle("Cell Clusters (UMAP)") + custom_theme
+  p_tsne <- DimPlot(seurat_obj, reduction = "tsne", group.by = "Cluster", label = TRUE) +
+    ggtitle("Cell Clusters (t-SNE)") + custom_theme
+  ggsave(file.path(output_dir, "umap_clusters.pdf"), p_umap, width = 8, height = 7)
+  ggsave(file.path(output_dir, "tsne_clusters.pdf"), p_tsne, width = 8, height = 7)
+  p_dot <- DotPlot(seurat_obj, features = core_genes_in_data, group.by = "Cluster") +
+    ggtitle("Core Gene Expression by Cluster") +
+    xlab("Gene") + ylab("Cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    custom_theme
+  p_dot <- p_dot + scale_x_discrete(labels = function(x) {
+    sapply(x, function(gene) {
+      if (gene %in% names(mapped_to_original)) {
+        return(mapped_to_original[gene])
+      } else {
+        return(gene)
+      }
+    })
+  })
+  ggsave(file.path(output_dir, "dotplot_core_genes.pdf"), p_dot, width = 10, height = 8)
+  log_message("生成核心基因热图...")
+  scaled_genes <- intersect(core_genes_in_data, rownames(GetAssayData(seurat_obj, slot = "scale.data")))
+  if(length(scaled_genes) > 0) {
+    expr_matrix <- GetAssayData(seurat_obj, slot = "scale.data")[scaled_genes, ]
+    rownames(expr_matrix) <- sapply(rownames(expr_matrix), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    cell_anno <- data.frame(Cluster = seurat_obj$Cluster)
+    rownames(cell_anno) <- colnames(expr_matrix)
+    n_clusters <- length(unique(seurat_obj$Cluster))
+    cluster_colors <- colorRampPalette(brewer.pal(min(9, n_clusters), "Set1"))(n_clusters)
+    names(cluster_colors) <- unique(seurat_obj$Cluster)
+    anno_colors <- list(Cluster = cluster_colors)
+    pdf(file.path(output_dir, "heatmap_core_genes.pdf"), width = 10, height = 8)
+    pheatmap(
+      expr_matrix,
+      annotation_col = cell_anno,
+      annotation_colors = anno_colors,
+      show_colnames = FALSE,
+      cluster_rows = TRUE,
+      cluster_cols = TRUE,
+      scale = "row",
+      main = "Core Genes Expression Heatmap"
+    )
+    dev.off()
+  } else {
+    log_message("警告: 没有核心基因在缩放数据中，跳过热图生成")
+  }
+  violin_plots <- list()
+  for (i in 1:length(core_genes_in_data)) {
+    gene <- core_genes_in_data[i]
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    tryCatch({
+      p <- VlnPlot(seurat_obj, features = gene, group.by = "Cluster", pt.size = 0) +
+        ggtitle(paste("Expression of", orig_gene, "by Cluster")) +
+        custom_theme
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)
+      ggsave(file.path(output_dir, paste0("violin_", clean_name, ".pdf")), p, width = 8, height = 6)
+      violin_plots[[i]] <- p
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的小提琴图时出错:", e$message))
+    })
+  }
+  if (length(violin_plots) > 0) {
+    n_plots <- min(4, length(violin_plots))
+    combined_violin <- plot_grid(plotlist = violin_plots[1:n_plots], ncol = 2)
+    ggsave(file.path(output_dir, "combined_violin_plots.pdf"), combined_violin, width = 12, height = 10)
+  }
+  for (gene in core_genes_in_data) {
+    orig_gene <- if (gene %in% names(mapped_to_original)) mapped_to_original[gene] else gene
+    tryCatch({
+      clean_name <- gsub("[^a-zA-Z0-9]", "_", orig_gene)
+      p_feat_umap <- FeaturePlot(seurat_obj, features = gene, reduction = "umap") +
+        ggtitle(paste(orig_gene, "Expression (UMAP)")) +
+        custom_theme
+      p_feat_tsne <- FeaturePlot(seurat_obj, features = gene, reduction = "tsne") +
+        ggtitle(paste(orig_gene, "Expression (t-SNE)")) +
+        custom_theme
+      ggsave(file.path(output_dir, paste0("umap_", clean_name, ".pdf")), p_feat_umap, width = 8, height = 7)
+      ggsave(file.path(output_dir, paste0("tsne_", clean_name, ".pdf")), p_feat_tsne, width = 8, height = 7)
+    }, error = function(e) {
+      log_message(paste("错误: 创建", orig_gene, "的特征图时出错:", e$message))
+    })
+  }
+  if (length(core_genes_in_data) >= 2) {
+    log_message("生成共表达散点图...")
+    expr_data <- t(as.matrix(GetAssayData(seurat_obj, slot = "data", assay = "RNA")[core_genes_in_data, ]))
+    expr_df <- as.data.frame(expr_data)
+    colnames(expr_df) <- sapply(colnames(expr_df), function(x) {
+      if (x %in% names(mapped_to_original)) {
+        return(mapped_to_original[x])
+      } else {
+        return(x)
+      }
+    })
+    expr_df$Cluster <- seurat_obj$Cluster
+    gene_pairs <- combn(colnames(expr_df)[colnames(expr_df) != "Cluster"], 2, simplify = FALSE)
+    max_plots <- min(15, length(gene_pairs))
+    for (i in 1:max_plots) {
+      pair <- gene_pairs[[i]]
+      gene1 <- pair[1]
+      gene2 <- pair[2]
+      tryCatch({
+        p <- ggplot(expr_df, aes(x = .data[[gene1]], y = .data[[gene2]], color = Cluster)) +
+          geom_point(alpha = 0.6, size = 1) +
+          ggtitle(paste("Co-expression of", gene1, "and", gene2)) +
+          theme_classic() +
+          custom_theme
+        clean_gene1 <- gsub("[^a-zA-Z0-9]", "_", gene1)
+        clean_gene2 <- gsub("[^a-zA-Z0-9]", "_", gene2)
+        ggsave(file.path(output_dir, paste0("coexp_", clean_gene1, "_", clean_gene2, ".pdf")),
+               p, width = 8, height = 7)
+      }, error = function(e) {
+        log_message(paste("错误: 创建", gene1, "和", gene2, "的共表达图时出错:", e$message))
+      })
+    }
+  }
+  saveRDS(seurat_obj, file = file.path(output_dir, "seurat_object.rds"))
+  log_message(paste("Seurat对象已保存至", file.path(output_dir, "seurat_object.rds")))
+}
+log_message("\n分析完成! 结果已保存至 " %+% output_dir)
+close(log_con)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(ggpubr)
+library(ggsci)
+options(repr.plot.width = 12, repr.plot.height = 10, repr.plot.res = 300)
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+log_message("\n=============================================")
+log_message("开始细胞类型注释与高质量可视化...")
+log_message("=============================================")
+publication_theme <- theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.8, "lines")
+  )
+log_message("读取先前保存的Seurat对象...")
+seurat_obj <- readRDS(file.path(output_dir, "seurat_object.rds"))
+log_message(paste0("载入的Seurat对象包含 ", ncol(seurat_obj), " 个细胞"))
+log_message(paste0("当前活跃标识: ", Idents(seurat_obj)[1], " (示例)"))
+log_message("检查降维信息...")
+reductions_exist <- names(seurat_obj@reductions)
+log_message(paste0("找到的降维: ", paste(reductions_exist, collapse=", ")))
+if (!("umap" %in% reductions_exist) || !("tsne" %in% reductions_exist)) {
+  log_message("未找到UMAP或tSNE降维，正在重新运行PCA和降维...")
+  if (!"scale.data" %in% names(seurat_obj@assays$RNA)) {
+    log_message("缩放数据...")
+    seurat_obj <- ScaleData(seurat_obj, features = rownames(seurat_obj))
+  }
+  if (!("pca" %in% reductions_exist)) {
+    log_message("运行PCA...")
+    if (length(VariableFeatures(seurat_obj)) == 0) {
+      seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+    }
+    seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(seurat_obj))
+  }
+  if (!("umap" %in% reductions_exist)) {
+    log_message("运行UMAP...")
+    seurat_obj <- RunUMAP(seurat_obj, dims = 1:20)
+  }
+  if (!("tsne" %in% reductions_exist)) {
+    log_message("运行tSNE...")
+    seurat_obj <- RunTSNE(seurat_obj, dims = 1:20)
+  }
+  reductions_updated <- names(seurat_obj@reductions)
+  log_message(paste0("更新后的降维: ", paste(reductions_updated, collapse=", ")))
+}
+log_message("定义细胞类型映射...")
+cell_type_map <- c(
+  "0" = "Unknown",
+  "1" = "Unknown",
+  "2" = "Fibroblasts",
+  "3" = "Unknown",
+  "4" = "Unknown",
+  "5" = "Keratinocytes",
+  "6" = "Keratinocytes",
+  "7" = "Unknown",
+  "8" = "Fibroblasts",
+  "9" = "Unknown",
+  "10" = "Erythroid-like and erythroid precursor cells",
+  "11" = "Unknown",
+  "12" = "Unknown",
+  "13" = "Mast cells",
+  "14" = "Macrophages",
+  "15" = "Unknown",
+  "16" = "Peri-islet Schwann cells",
+  "17" = "Unknown",
+  "18" = "Myocytes",
+  "19" = "Endothelial cells",
+  "20" = "Unknown",
+  "21" = "Fibroblasts",
+  "22" = "Endothelial cells"
+)
+short_labels_map <- c(
+  "Unknown" = "Unknown",
+  "Fibroblasts" = "Fibroblasts",
+  "Keratinocytes" = "Keratinocytes",
+  "Erythroid-like and erythroid precursor cells" = "Erythroid cells",
+  "Mast cells" = "Mast cells",
+  "Macrophages" = "Macrophages",
+  "Peri-islet Schwann cells" = "Schwann cells",
+  "Myocytes" = "Myocytes",
+  "Endothelial cells" = "Endothelial cells"
+)
+if (!("Cluster" %in% colnames(seurat_obj@meta.data))) {
+  log_message("警告: 未找到'Cluster'列，尝试从活跃标识获取...")
+  seurat_obj$Cluster <- as.character(Idents(seurat_obj))
+}
+log_message("为细胞添加类型注释 (修复版)...")
+cell_types <- rep("Unknown", ncol(seurat_obj))
+for (i in 1:ncol(seurat_obj)) {
+  cell_id <- colnames(seurat_obj)[i]
+  cluster_id <- as.character(seurat_obj@meta.data[cell_id, "Cluster"])
+  if (cluster_id %in% names(cell_type_map)) {
+    cell_types[i] <- cell_type_map[cluster_id]
+  }
+}
+cell_types_named <- cell_types
+names(cell_types_named) <- colnames(seurat_obj)
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_types_named, col.name = "cell_type")
+cell_subtypes <- paste0(cell_types, " (", as.character(seurat_obj@meta.data$Cluster), ")")
+names(cell_subtypes) <- colnames(seurat_obj)
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_subtypes, col.name = "cell_subtype")
+cell_types_short <- cell_types
+for (i in 1:length(cell_types_short)) {
+  if (cell_types_short[i] %in% names(short_labels_map)) {
+    cell_types_short[i] <- short_labels_map[cell_types_short[i]]
+  }
+}
+names(cell_types_short) <- colnames(seurat_obj)
+seurat_obj <- AddMetaData(seurat_obj, metadata = cell_types_short, col.name = "cell_type_short")
+known_types <- unique(seurat_obj$cell_type)
+known_types <- known_types[known_types != "Unknown"]
+cell_type_levels <- c(sort(known_types), "Unknown")
+seurat_obj$cell_type <- factor(seurat_obj$cell_type, levels = cell_type_levels)
+seurat_obj$cell_type_short <- factor(seurat_obj$cell_type_short,
+                                     levels = short_labels_map[match(cell_type_levels, names(short_labels_map))])
+log_message("细胞类型分布:")
+cell_type_counts <- table(seurat_obj$cell_type)
+print(cell_type_counts)
+log_message(paste0("已识别 ", sum(names(cell_type_counts) != "Unknown"), " 种已知细胞类型"))
+log_message("设置出版级别配色方案...")
+n_known_types <- length(cell_type_levels) - 1
+if (n_known_types <= 8) {
+  main_colors <- colorRampPalette(brewer.pal(8, "Set1"))(n_known_types)
+} else {
+  main_colors <- colorRampPalette(brewer.pal(9, "Set1"))(n_known_types)
+}
+cell_type_colors <- c(main_colors, "Unknown" = "#cccccc")
+names(cell_type_colors) <- cell_type_levels
+cluster_ids <- sort(as.numeric(as.character(unique(seurat_obj$Cluster))))
+n_clusters <- length(cluster_ids)
+cluster_colors <- colorRampPalette(brewer.pal(min(9, n_clusters), "Set3"))(n_clusters)
+names(cluster_colors) <- as.character(cluster_ids)
+log_message("开始生成高质量可视化图形...")
+log_message("生成细胞类型UMAP图...")
+p1 <- DimPlot(seurat_obj,
+              reduction = "umap",
+              group.by = "cell_type",
+              cols = cell_type_colors,
+              pt.size = 0.6,
+              label = TRUE,
+              label.size = 4,
+              repel = TRUE) +
+  labs(title = "UMAP: Cell Type Classification") +
+  publication_theme +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+ggsave(file.path(pub_dir, "Figure1_UMAP_CellTypes.pdf"), p1, width = 12, height = 9, dpi = 300)
+ggsave(file.path(pub_dir, "Figure1_UMAP_CellTypes.png"), p1, width = 12, height = 9, dpi = 300)
+log_message("生成细胞类型tSNE图...")
+p2 <- DimPlot(seurat_obj,
+              reduction = "tsne",
+              group.by = "cell_type",
+              cols = cell_type_colors,
+              pt.size = 0.6,
+              label = TRUE,
+              label.size = 4,
+              repel = TRUE) +
+  labs(title = "t-SNE: Cell Type Classification") +
+  publication_theme +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.pdf"), p2, width = 12, height = 9, dpi = 300)
+ggsave(file.path(pub_dir, "Figure2_tSNE_CellTypes.png"), p2, width = 12, height = 9, dpi = 300)
+log_message("生成聚类与细胞类型对比图...")
+p3a <- DimPlot(seurat_obj,
+               reduction = "umap",
+               group.by = "Cluster",
+               cols = cluster_colors,
+               pt.size = 0.4,
+               label = TRUE,
+               label.size = 3.5) +
+  labs(title = "Original Clusters") +
+  publication_theme
+p3b <- DimPlot(seurat_obj,
+               reduction = "umap",
+               group.by = "cell_type_short",
+               cols = cell_type_colors,
+               pt.size = 0.4,
+               label = TRUE,
+               label.size = 3.5) +
+  labs(title = "Annotated Cell Types") +
+  publication_theme
+p3 <- p3a + p3b + plot_layout(ncol = 2, guides = "collect")
+ggsave(file.path(pub_dir, "Figure3_Clusters_vs_CellTypes.pdf"), p3, width = 16, height = 7, dpi = 300)
+ggsave(file.path(pub_dir, "Figure3_Clusters_vs_CellTypes.png"), p3, width = 16, height = 7, dpi = 300)
+log_message("生成细胞类型分布图...")
+cell_count_df <- as.data.frame(table(seurat_obj$cell_type))
+colnames(cell_count_df) <- c("CellType", "Count")
+cell_count_df$Percentage <- cell_count_df$Count / sum(cell_count_df$Count) * 100
+cell_count_df$CellType <- factor(cell_count_df$CellType, levels = cell_type_levels)
+p4 <- ggplot(cell_count_df, aes(x = reorder(CellType, -Count), y = Count, fill = CellType)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = paste0(Count, "\n(", round(Percentage, 1), "%)")),
+            vjust = -0.5, size = 4) +
+  scale_fill_manual(values = cell_type_colors) +
+  labs(title = "Cell Type Distribution",
+       x = "Cell Type",
+       y = "Number of Cells") +
+  publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+ggsave(file.path(pub_dir, "Figure4_CellType_Distribution.pdf"), p4, width = 12, height = 8, dpi = 300)
+ggsave(file.path(pub_dir, "Figure4_CellType_Distribution.png"), p4, width = 12, height = 8, dpi = 300)
+if (exists("core_genes_in_data") && length(core_genes_in_data) > 0) {
+  log_message("使用核心基因生成表型图...")
+  p5 <- DotPlot(seurat_obj,
+                features = core_genes_in_data,
+                group.by = "cell_type") +
+    scale_color_viridis_c() +
+    labs(title = "Core Gene Expression by Cell Type") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title = element_text(size = 14, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+    p5 <- p5 + scale_x_discrete(labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(mapped_to_original[gene])
+        } else {
+          return(gene)
+        }
+      })
+    })
+  }
+  ggsave(file.path(pub_dir, "Figure5_CoreGenes_DotPlot.pdf"), p5, width = 12, height = 8, dpi = 300)
+  ggsave(file.path(pub_dir, "Figure5_CoreGenes_DotPlot.png"), p5, width = 12, height = 8, dpi = 300)
+  if (length(core_genes_in_data) > 0) {
+    log_message("生成核心基因表达特征图...")
+    selected_genes <- head(core_genes_in_data, min(4, length(core_genes_in_data)))
+    feature_plots <- list()
+    for (i in seq_along(selected_genes)) {
+      gene <- selected_genes[i]
+      if (gene %in% names(mapped_to_original)) {
+        gene_name <- mapped_to_original[gene]
+      } else {
+        gene_name <- gene
+      }
+      p <- FeaturePlot(seurat_obj,
+                       features = gene,
+                       reduction = "umap",
+                       pt.size = 0.8,
+                       order = TRUE) +
+        scale_color_viridis_c() +
+        labs(title = paste0(gene_name, " Expression")) +
+        publication_theme
+      feature_plots[[i]] <- p
+      ggsave(file.path(pub_dir, paste0("Figure6_", gene_name, "_Expression.pdf")),
+             p, width = 8, height = 7, dpi = 300)
+    }
+    if (length(feature_plots) > 1) {
+      combined_features <- wrap_plots(feature_plots, ncol = 2)
+      ggsave(file.path(pub_dir, "Figure6_Combined_Features.pdf"),
+             combined_features, width = 16, height = 14, dpi = 300)
+      ggsave(file.path(pub_dir, "Figure6_Combined_Features.png"),
+             combined_features, width = 16, height = 14, dpi = 300)
+    }
+  }
+}
+log_message("鉴定每种细胞类型的标记基因...")
+Idents(seurat_obj) <- "cell_type"
+cell_type_markers <- FindAllMarkers(
+  seurat_obj,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+write.csv(cell_type_markers,
+          file.path(output_dir, "cell_type_markers.csv"),
+          row.names = FALSE)
+top_markers <- cell_type_markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+log_message("生成标记基因热图...")
+pdf(file.path(pub_dir, "Figure7_CellType_Markers_Heatmap.pdf"), width = 14, height = 10)
+DoHeatmap(seurat_obj,
+          features = top_markers$gene,
+          group.by = "cell_type",
+          size = 4,
+          angle = 45) +
+  scale_fill_viridis() +
+  labs(title = "Top 5 Marker Genes per Cell Type") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+dev.off()
+log_message("生成UMAP和tSNE分割视图...")
+main_cell_types <- cell_type_levels[cell_type_levels != "Unknown"]
+if (length(main_cell_types) > 6) {
+  main_cell_types <- main_cell_types[1:6]
+}
+cells_to_keep <- seurat_obj$cell_type %in% main_cell_types
+if (sum(cells_to_keep) > 0) {
+  seurat_obj_subset <- subset(seurat_obj, cells = colnames(seurat_obj)[cells_to_keep])
+  p8a <- DimPlot(seurat_obj_subset,
+                 reduction = "umap",
+                 group.by = "Cluster",
+                 split.by = "cell_type",
+                 pt.size = 0.5,
+                 ncol = 3) +
+    labs(title = "UMAP by Cell Type") +
+    publication_theme
+  ggsave(file.path(pub_dir, "Figure8_Split_UMAP.pdf"), p8a, width = 16, height = 12, dpi = 300)
+  p8b <- DimPlot(seurat_obj_subset,
+                 reduction = "tsne",
+                 group.by = "Cluster",
+                 split.by = "cell_type",
+                 pt.size = 0.5,
+                 ncol = 3) +
+    labs(title = "t-SNE by Cell Type") +
+    publication_theme
+  ggsave(file.path(pub_dir, "Figure8_Split_tSNE.pdf"), p8b, width = 16, height = 12, dpi = 300)
+}
+log_message("生成综合总结图...")
+p9_parts <- list()
+p9_parts[[1]] <- DimPlot(seurat_obj,
+                         reduction = "umap",
+                         group.by = "Cluster",
+                         pt.size = 0.4,
+                         label = TRUE,
+                         label.size = 3) +
+  labs(title = "Original Clusters") +
+  publication_theme +
+  theme(legend.position = "none")
+p9_parts[[2]] <- DimPlot(seurat_obj,
+                         reduction = "umap",
+                         group.by = "cell_type",
+                         cols = cell_type_colors,
+                         pt.size = 0.4,
+                         label = TRUE,
+                         label.size = 3) +
+  labs(title = "Cell Types") +
+  publication_theme +
+  theme(legend.position = "none")
+if (exists("core_genes_in_data") && length(core_genes_in_data) > 0) {
+  feature_gene <- core_genes_in_data[1]
+  if (feature_gene %in% names(mapped_to_original)) {
+    feature_name <- mapped_to_original[feature_gene]
+  } else {
+    feature_name <- feature_gene
+  }
+  p9_parts[[3]] <- FeaturePlot(seurat_obj,
+                               features = feature_gene,
+                               reduction = "umap",
+                               pt.size = 0.4,
+                               order = TRUE) +
+    scale_color_viridis_c() +
+    labs(title = paste0(feature_name, " Expression")) +
+    publication_theme
+}
+p9_parts[[4]] <- ggplot(cell_count_df, aes(x = reorder(CellType, -Count), y = Count, fill = CellType)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +
+  labs(title = "Cell Type Distribution",
+       x = "Cell Type",
+       y = "Count") +
+  publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.position = "none")
+p9 <- wrap_plots(p9_parts, ncol = 2)
+ggsave(file.path(pub_dir, "Figure9_Summary.pdf"), p9, width = 14, height = 12, dpi = 300)
+ggsave(file.path(pub_dir, "Figure9_Summary.png"), p9, width = 14, height = 12, dpi = 300)
+Idents(seurat_obj) <- "Cluster"
+log_message("保存注释后的Seurat对象...")
+saveRDS(seurat_obj, file.path(output_dir, "seurat_object_annotated.rds"))
+log_message("===================================================")
+log_message("细胞类型注释与高质量可视化完成!")
+log_message(paste0("所有图形已保存至: ", pub_dir))
+log_message("===================================================")
+log_message("生成核心基因表达的发表级点图...")
+library(ggplot2)
+library(viridis)
+library(scales)
+library(cowplot)
+if (!exists("seurat_obj") || !inherits(seurat_obj, "Seurat")) {
+  seurat_obj <- readRDS(file.path(output_dir, "seurat_object_annotated.rds"))
+}
+if (!exists("core_genes_in_data") || length(core_genes_in_data) == 0) {
+  if (file.exists(file.path(output_dir, "gene_mapping.csv"))) {
+    gene_mapping_df <- read.csv(file.path(output_dir, "gene_mapping.csv"))
+    core_genes_in_data <- as.character(gene_mapping_df$数据集中的基因)
+    mapped_to_original <- gene_mapping_df$原始基因
+    names(mapped_to_original) <- core_genes_in_data
+  } else {
+    log_message("Warning: No gene mapping found, using default core genes")
+    core_genes <- c("RAF1", "FCGR3A", "COL3A1", "FGFR1", "CDKN1B",
+                    "KITLG", "SPARCL1", "DLL4", "COL18A1", "FLT1")
+    human_to_mouse_map <- list(
+      "RAF1"    = c("Raf1"),
+      "FCGR3A"  = c("Fcgr3", "Fcgr4"),
+      "COL3A1"  = c("Col3a1"),
+      "FGFR1"   = c("Fgfr1"),
+      "CDKN1B"  = c("Cdkn1b"),
+      "KITLG"   = c("Kitl", "Kitlg"),
+      "SPARCL1" = c("Sparcl1"),
+      "DLL4"    = c("Dll4"),
+      "COL18A1" = c("Col18a1"),
+      "FLT1"    = c("Flt1", "Vegfr1")
+    )
+    mouse_genes <- c()
+    mapped_to_original <- c()
+    for (gene in core_genes) {
+      if (gene %in% names(human_to_mouse_map)) {
+        candidates <- human_to_mouse_map[[gene]]
+        for (mouse_gene in candidates) {
+          matches <- grep(mouse_gene, rownames(seurat_obj), value = TRUE, ignore.case = TRUE)
+          if (length(matches) > 0) {
+            mouse_genes <- c(mouse_genes, matches[1])
+            mapped_to_original <- c(mapped_to_original, gene)
+            break
+          }
+        }
+      }
+    }
+    if (length(mouse_genes) > 0) {
+      names(mapped_to_original) <- mouse_genes
+      core_genes_in_data <- mouse_genes
+    } else {
+      core_genes_in_data <- core_genes[core_genes %in% rownames(seurat_obj)]
+    }
+  }
+}
+pub_dir <- file.path(output_dir, "publication_figures")
+if (!dir.exists(pub_dir)) {
+  dir.create(pub_dir, recursive = TRUE)
+}
+dotplot_theme <- theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(1, "cm"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+p_dotplot <- DotPlot(
+  seurat_obj,
+  features = core_genes_in_data,
+  group.by = "cell_type",
+  dot.scale = 8,
+  dot.min = 0,
+  cols = c("lightgrey", "#0072B2")
+) +
+  scale_color_viridis_c(option = "D") +
+  labs(
+    title = "Expression Pattern of Core Genes in Mouse Skin Cell Types",
+    x = "Core Genes (Human/Mouse)",
+    y = "Cell Types",
+    color = "Average Expression",
+    size = "Percent Expressed"
+  ) +
+  dotplot_theme
+if (exists("mapped_to_original") && length(mapped_to_original) > 0) {
+  p_dotplot <- p_dotplot + scale_x_discrete(
+    labels = function(x) {
+      sapply(x, function(gene) {
+        if (gene %in% names(mapped_to_original)) {
+          return(paste0(mapped_to_original[gene], "\n(", gene, ")"))
+        } else {
+          return(gene)
+        }
+      })
+    }
+  )
+}
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes.pdf"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes.png"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+ggsave(
+  file.path(pub_dir, "Publication_DotPlot_CoreGenes.svg"),
+  p_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+log_message("高质量核心基因点图已保存至publication_figures文件夹")
