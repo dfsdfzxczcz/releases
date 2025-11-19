@@ -384,4 +384,5 @@ All Monte Carlo simulations use set.seed() (e.g. set.seed(2025)) before generati
 
 The number of iterations is fixed at N = 1,000, as reported in the paper.
 
+
 Scenario outputs (e.g. 3.10% [0.43–6.53%] global DALY reduction under the 10% high-BMI exposure reduction scenario) are directly obtained from these scripts and correspond to the values in Table 2 and the text.
