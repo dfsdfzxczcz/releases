@@ -4,7 +4,7 @@ README – Code and Data for
 
 1. Overview
 
-These archives contain the R code and minimal derived datasets used to reproduce the analyses, figures, and tables in the manuscript:
+These archives contain the R code and source datafiles used to reproduce the analyses, figures, and tables in the manuscript:
 
 Ren Z et al. Global Burden of Hip Osteoarthritis and High BMI Attribution from 1990 to 2021: Decomposition of Drivers and Policy Scenario Assessment Based on GBD 2021.
 
@@ -386,3 +386,4 @@ The number of iterations is fixed at N = 1,000, as reported in the paper.
 
 
 Scenario outputs (e.g. 3.10% [0.43–6.53%] global DALY reduction under the 10% high-BMI exposure reduction scenario) are directly obtained from these scripts and correspond to the values in Table 2 and the text.
+
